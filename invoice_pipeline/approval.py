@@ -47,18 +47,48 @@ def _decision(outcome, reasons, row, decided_by="rule_engine", **extra) -> Decis
     )
 
 
+_RANK = {Severity.REJECTION_RULE: 0, Severity.REVIEW_TRIGGER: 1, Severity.WARNING: 2}
+
+
+def _reasons(findings: list[Finding]) -> list[str]:
+    ordered = sorted(findings, key=lambda f: _RANK[f.severity])
+    return [f"{_where(f)}: {f.detail}" for f in ordered]
+
+
+def _duplicate(case_file: CaseFile) -> Decision:
+    arrival, currency = case_file.arrival, case_file.invoice.currency
+    claimed = (
+        f"already paid {arrival.paid_to_date:.2f} {currency}"
+        if arrival.claimed_state == "paid"
+        else f"payment of {arrival.paid_to_date:.2f} {currency} pending"
+    )
+    return _decision(
+        Outcome.DUPLICATE,
+        [f"DUPLICATE_PAYMENT: {claimed} on arrival #{arrival.duplicate_of}"],
+        1,
+        duplicate_of=arrival.duplicate_of,
+    )
+
+
+def decide_unreadable(findings: list[Finding]) -> Decision:
+    """An Unreadable Document has no invoice: row 3, with no Validation and no model call."""
+    return _decision(Outcome.NEEDS_REVIEW, _reasons(findings), 3)
+
+
 def decide(case_file: CaseFile, agents: Agents) -> Decision:
     """Normative precedence, first matching row wins. Only this function builds a Decision."""
-    warnings = _of(case_file, Severity.WARNING)
-    if (
-        case_file.arrival.kind == "duplicate"
-        or _of(case_file, Severity.REJECTION_RULE)
-        or _of(case_file, Severity.REVIEW_TRIGGER)
-    ):
-        raise NotImplementedError("precedence rows 1-3 land with task 1.13")
-    if warnings:
+    if case_file.arrival.kind == "duplicate":  # row 1: no model call of any kind
+        return _duplicate(case_file)
+    if _of(case_file, Severity.REJECTION_RULE):  # row 2
+        decision = _decision(Outcome.REJECTED, _reasons(case_file.findings), 2)
+    elif _of(case_file, Severity.REVIEW_TRIGGER):  # row 3: human-only
+        decision = _decision(Outcome.NEEDS_REVIEW, _reasons(case_file.findings), 3)
+    elif warnings := _of(case_file, Severity.WARNING):  # rows 4-5
         return _decide_warnings(case_file, agents, warnings)
-    return _decide_clean(case_file, agents)
+    else:  # row 6
+        return _decide_clean(case_file, agents)
+    decision.advisory = agents.advise(case_file, decision)  # explains; never read back
+    return decision
 
 
 def _decide_warnings(case_file: CaseFile, agents: Agents, warnings: list[Finding]) -> Decision:

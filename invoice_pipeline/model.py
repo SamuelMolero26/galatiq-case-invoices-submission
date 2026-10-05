@@ -194,6 +194,7 @@ class ArrivalSummary(BaseModel):
     kind: Literal["new", "duplicate", "revision", "supersedes"]
     duplicate_of: int | None = None
     paid_to_date: Decimal | None = None  # claimed amount for duplicate/revision
+    claimed_state: Literal["paid", "payment_pending"] = "paid"  # state of the claimed arrival
     amount_due: Decimal | None = None
 
 
