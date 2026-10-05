@@ -1,17 +1,21 @@
 """Constructed invoices and catalogs for unit tests (no corpus files, no database)."""
 
 from collections import Counter
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from invoice_pipeline import ledger
 from invoice_pipeline.catalog import Catalog, KnownVendor
 from invoice_pipeline.critic import build_case_file, offline_role
 from invoice_pipeline.model import (
     Agents,
     ArrivalSummary,
     CaseFile,
+    Decision,
+    Ingested,
     Invoice,
     LineItem,
+    Outcome,
     RoleCall,
     vendor_key,
 )
@@ -172,3 +176,34 @@ class CountingAgents:
     @property
     def agents(self) -> Agents:
         return Agents(self._assess, self._verify, self._escalate_review, self._advise_role)
+
+
+NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+
+def make_arrival(
+    outcome=Outcome.APPROVED,
+    invoice=None,
+    findings=(),
+    amount_due="auto",
+    arrived_at=NOW,
+    reasons=("why",),
+    **decision_kw,
+) -> ledger.Arrival:
+    """A Ledger write-phase record for a constructed invoice and a hand-built Decision."""
+    invoice = invoice or make_invoice()
+    decision = Decision(
+        outcome=outcome,
+        reasons=list(reasons),
+        precedence_row=6,
+        decided_by="rule_engine",
+        **decision_kw,
+    )
+    return ledger.Arrival(
+        source=invoice.source_path,
+        arrived_at=arrived_at,
+        ingested=Ingested(invoice=invoice, findings=[]),
+        findings=list(findings),
+        decision=decision,
+        amount_due=invoice.total if amount_due == "auto" else amount_due,
+    )
