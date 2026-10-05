@@ -78,7 +78,7 @@ def seed(path: Path, reset: bool = False) -> None:
                 sku TEXT PRIMARY KEY, stock_level INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS vendors (
                 name_key TEXT PRIMARY KEY, display_name TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (status IN ('trusted', 'blocked')));
+                status TEXT NOT NULL CHECK (status IN ('trusted', 'blocked', 'unknown')));
             CREATE TABLE IF NOT EXISTS pricing (sku TEXT PRIMARY KEY, unit_price TEXT NOT NULL);
             """
         )
