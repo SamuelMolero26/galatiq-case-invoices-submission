@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from invoice_pipeline.ingestion.pdf import parse_pdf
-from invoice_pipeline.ingestion.structured import parse_json
+from invoice_pipeline.ingestion.structured import parse_csv, parse_json, parse_xml
 from invoice_pipeline.ingestion.text import parse_text
 from invoice_pipeline.model import FindingCode, Ingested, finding
 
@@ -23,7 +23,7 @@ def ingest(path: Path | str) -> Ingested:
     step = "route"
     try:
         suffix = path.suffix.lower()
-        if suffix not in (".txt", ".json", ".pdf"):
+        if suffix not in (".txt", ".json", ".csv", ".xml", ".pdf"):
             return _unreadable(f"route: unsupported file type {path.suffix!r}")
         step = "read"
         if not path.read_bytes().strip():
@@ -33,6 +33,10 @@ def ingest(path: Path | str) -> Ingested:
             result = parse_text(path.read_text(encoding="utf-8"), path.name, "txt")
         elif suffix == ".json":
             result = parse_json(path.read_text(encoding="utf-8"), path.name)
+        elif suffix == ".csv":
+            result = parse_csv(path.read_text(encoding="utf-8"), path.name)
+        elif suffix == ".xml":
+            result = parse_xml(path.read_text(encoding="utf-8"), path.name)
         else:
             result = parse_pdf(path)
         if result.invoice is not None and not result.invoice.items:
