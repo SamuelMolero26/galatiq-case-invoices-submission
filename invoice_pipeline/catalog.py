@@ -15,6 +15,7 @@ from typing import NamedTuple
 
 from invoice_pipeline.model import vendor_key
 
+DEFAULT_INVENTORY_PATH = Path("inventory.db")
 SCHEMA_VERSION = 1
 TABLES = ("inventory", "vendors", "pricing")
 
