@@ -1,10 +1,21 @@
 """Constructed invoices and catalogs for unit tests (no corpus files, no database)."""
 
+from collections import Counter
 from datetime import date
 from decimal import Decimal
 
 from invoice_pipeline.catalog import Catalog, KnownVendor
-from invoice_pipeline.model import Invoice, LineItem, vendor_key
+from invoice_pipeline.critic import build_case_file, offline_role
+from invoice_pipeline.model import (
+    Agents,
+    ArrivalSummary,
+    CaseFile,
+    Invoice,
+    LineItem,
+    RoleCall,
+    vendor_key,
+)
+from invoice_pipeline.validation import validate
 
 _DEFAULT = object()
 
@@ -116,3 +127,48 @@ def make_catalog(**overrides) -> Catalog:
 
 def codes(findings) -> list[str]:
     return [f.code.value for f in findings]
+
+
+def case_file_for(invoice: Invoice, catalog: Catalog | None = None, arrival=None, history=()):
+    """Validate a constructed invoice and assemble its (slice-1) Case File."""
+    catalog = catalog or make_catalog()
+    arrival = arrival or ArrivalSummary(kind="new", amount_due=invoice.total)
+    return build_case_file(
+        invoice,
+        validate(invoice, catalog),
+        arrival,
+        None,
+        catalog,
+        list(history),
+        len(history),
+    )
+
+
+def online_role(role: str, answer: dict | None, error: str | None = None) -> RoleCall:
+    return RoleCall(role=role, tier="stub", model="stub", tries=[], answer=answer, error=error)
+
+
+class CountingAgents:
+    """Stub model roles that count their calls; offline by default."""
+
+    def __init__(self, escalate=None, advise=None):
+        self.calls: Counter[str] = Counter()
+        self._escalate, self._advise = escalate, advise
+
+    def _assess(self, *args, **kwargs):
+        self.calls["assess"] += 1
+
+    def _verify(self, *args, **kwargs):
+        self.calls["verify"] += 1
+
+    def _escalate_review(self, case_file: CaseFile) -> RoleCall:
+        self.calls["escalate_review"] += 1
+        return self._escalate or offline_role("escalate_review")
+
+    def _advise_role(self, case_file: CaseFile, decision) -> RoleCall:
+        self.calls["advise"] += 1
+        return self._advise or offline_role("advisory")
+
+    @property
+    def agents(self) -> Agents:
+        return Agents(self._assess, self._verify, self._escalate_review, self._advise_role)

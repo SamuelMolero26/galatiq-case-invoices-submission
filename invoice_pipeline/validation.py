@@ -92,9 +92,18 @@ def _valid_quantity(quantity: Decimal | None) -> bool:
     return quantity is not None and quantity > 0 and quantity == quantity.to_integral_value()
 
 
+def aggregate_quantities(invoice: Invoice, catalog: Catalog) -> dict[str, Decimal]:
+    """Valid quantities summed per canonical SKU; invalid quantities are never invented."""
+    aggregated: dict[str, Decimal] = defaultdict(Decimal)
+    for item in invoice.items:
+        sku = catalog.resolve_sku(item.sku)
+        if sku is not None and _valid_quantity(item.quantity):
+            aggregated[sku] += item.quantity
+    return dict(aggregated)
+
+
 def _items(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     findings: list[Finding] = []
-    aggregated: dict[str, Decimal] = defaultdict(Decimal)
     unknown: set[str] = set()
     for index, item in enumerate(invoice.items):
         if not _valid_quantity(item.quantity):
@@ -106,27 +115,23 @@ def _items(invoice: Invoice, catalog: Catalog) -> list[Finding]:
                     line=index,
                 )
             )
-        sku = catalog.resolve_sku(item.sku)
-        if sku is None:
+        if catalog.resolve_sku(item.sku) is None:
             name = item.sku or item.raw_name
             if name not in unknown:
                 unknown.add(name)
                 findings.append(
                     finding(FindingCode.ITEM_UNKNOWN, f"item '{name}' is not in inventory", index)
                 )
-        elif _valid_quantity(item.quantity):
-            aggregated[sku] += item.quantity
 
-    zero_stock = {sku for sku, level in catalog.stock.items() if level == 0}
     reported_zero: set[str] = set()
     for index, item in enumerate(invoice.items):
         sku = catalog.resolve_sku(item.sku)
-        if sku in zero_stock and sku not in reported_zero:
+        if sku is not None and catalog.stock.get(sku) == 0 and sku not in reported_zero:
             reported_zero.add(sku)
             findings.append(
                 finding(FindingCode.ITEM_ZERO_STOCK, f"item '{sku}' has Stock Level 0", index)
             )
-    for sku, quantity in aggregated.items():
+    for sku, quantity in aggregate_quantities(invoice, catalog).items():
         level = catalog.stock.get(sku)
         if level is not None and level > 0 and quantity > level:
             findings.append(
