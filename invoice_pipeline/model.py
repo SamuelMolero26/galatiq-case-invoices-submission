@@ -1,8 +1,12 @@
 """Typed contract shared by every stage. Severity is defined once, in `SEVERITY`."""
 
+import re
+from datetime import date
+from decimal import Decimal
 from enum import StrEnum, auto
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 
 
 class Severity(StrEnum):
@@ -76,3 +80,77 @@ class Finding(BaseModel, frozen=True):
 def finding(code: FindingCode, detail: str, line: int | None = None) -> Finding:
     """The only Finding constructor: severity always comes from `SEVERITY`."""
     return Finding(code=code, severity=SEVERITY[code], detail=detail, line=line)
+
+
+def _no_float(value):
+    if isinstance(value, float):
+        raise ValueError("money and quantities must be Decimal or str, never float")
+    return value
+
+
+Money = Annotated[Decimal, BeforeValidator(_no_float)]
+
+
+def vendor_key(name: str | None) -> str | None:
+    """Comparison key: trimmed, case-folded, whitespace-collapsed. None when blank."""
+    key = " ".join((name or "").split()).casefold()
+    return key or None
+
+
+def normalize_invoice_number(raw: str | None) -> str | None:
+    """Canonical `INV-<digits>` when digits are present; otherwise the upper-cased text."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    digits = re.sub(r"\D", "", text)
+    return f"INV-{digits}" if digits else text.upper()
+
+
+class LineItem(BaseModel):
+    raw_name: str
+    sku: str | None  # normalized; None when not recognizable
+    raw_quantity: str | None  # original token, retained even when non-numeric
+    quantity: Money | None  # None/zero/negative/fractional -> QUANTITY_INVALID
+    unit_price: Money | None
+    line_total: Money | None
+    note: str | None = None  # context, never an exemption
+
+
+class Invoice(BaseModel):
+    invoice_number: str | None
+    vendor: str | None
+    revision: str | None = None
+    invoice_date: date | None
+    due_date_text: str | None  # raw context only (no deadline is derived)
+    payment_terms: str | None  # raw context only
+    currency: str  # ISO-4217 upper-case
+    items: list[LineItem]
+    subtotal: Money | None
+    tax: Money | None
+    shipping: Money | None
+    total: Money | None
+    notes: str | None
+    po_reference: str | None
+    source_path: str
+    source_format: Literal["txt", "json", "csv", "xml", "pdf"]
+    extracted_fields: list[str] = []  # fields supplied by the Extraction Fallback
+
+    def identity(self) -> tuple[str, str] | None:
+        """(vendor_key, normalized number); None unless both parts are present."""
+        key, number = vendor_key(self.vendor), normalize_invoice_number(self.invoice_number)
+        return (key, number) if key and number else None
+
+
+class Repair(BaseModel):
+    field: str  # "invoice_date", "items[2].line_total"
+    raw: str  # "2O26"
+    repaired: str  # "2026"
+
+
+class Ingested(BaseModel):
+    invoice: Invoice | None  # None -> Unreadable Document
+    findings: list[Finding]
+    repairs: list[Repair] = []  # Reviewer evidence only; never in the Case File
+    unreadable_reason: str | None = None  # "<step>: <ErrorType>: <message>" when invoice is None
+    raw_text: str | None = None  # TXT / PDF text layer; input of the Extraction Fallback
+    missing_required: list[Literal["vendor", "invoice_number", "total", "items"]] = []
