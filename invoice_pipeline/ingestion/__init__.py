@@ -1,1 +1,53 @@
 """Deterministic Ingestion: one document in, one typed invoice (or Unreadable Document) out."""
+
+from collections.abc import Callable
+from pathlib import Path
+
+from invoice_pipeline.ingestion.pdf import parse_pdf
+from invoice_pipeline.ingestion.structured import parse_json
+from invoice_pipeline.ingestion.text import parse_text
+from invoice_pipeline.model import FindingCode, Ingested, finding
+
+
+def _txt(path: Path) -> Ingested:
+    return parse_text(path.read_text(encoding="utf-8"), path.name, "txt")
+
+
+def _json(path: Path) -> Ingested:
+    return parse_json(path.read_text(encoding="utf-8"), path.name)
+
+
+_PARSERS: dict[str, Callable[[Path], Ingested]] = {
+    ".txt": _txt,
+    ".json": _json,
+    ".pdf": parse_pdf,
+}
+
+
+def _unreadable(reason: str, raw_text: str | None = None) -> Ingested:
+    return Ingested(
+        invoice=None,
+        findings=[finding(FindingCode.UNREADABLE_DOCUMENT, reason)],
+        unreadable_reason=reason,
+        raw_text=raw_text,
+    )
+
+
+def ingest(path: Path | str) -> Ingested:
+    """Never raises: any failure becomes an Unreadable Document naming step, type and message."""
+    path = Path(path)
+    step = "route"
+    try:
+        parser = _PARSERS.get(path.suffix.lower())
+        if parser is None:
+            return _unreadable(f"route: unsupported file type {path.suffix!r}")
+        step = "read"
+        if not path.read_bytes().strip():
+            return _unreadable("read: the file is empty")
+        step = "parse"
+        result = parser(path)
+        if result.invoice is not None and not result.invoice.items:
+            return _unreadable("parse: no line item could be recovered", result.raw_text)
+        return result
+    except Exception as exc:
+        return _unreadable(f"{step}: {type(exc).__name__}: {exc}")
