@@ -17,6 +17,7 @@ def validate(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     findings += _payable(invoice)
     findings += reconcile(invoice)[0]
     findings += _prices(invoice, catalog)
+    findings += _currency(invoice)
     return findings
 
 
@@ -205,4 +206,17 @@ def _prices(invoice: Invoice, catalog: Catalog) -> list[Finding]:
             line=index,
         )
         for index in price_deviations(invoice, catalog)
+    ]
+
+
+def _currency(invoice: Invoice) -> list[Finding]:
+    """Slice 1 fails closed on any non-USD invoice; Reference Rates arrive in slice 3."""
+    if invoice.currency == "USD":
+        return []
+    return [
+        finding(FindingCode.CURRENCY_NON_USD, f"invoice currency is {invoice.currency}"),
+        finding(
+            FindingCode.CURRENCY_NO_RATE,
+            f"currency not supported yet: no reference rate for {invoice.currency}",
+        ),
     ]
