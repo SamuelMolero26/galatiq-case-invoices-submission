@@ -45,7 +45,8 @@ def test_csv_row_per_line_shape_with_footer_rows_1007():
 
 
 def test_csv_money_is_exact_decimal():
-    text = "field,value\ninvoice_number,1\nvendor,A\nitem,W\nquantity,1\nunit_price,10.10\ntotal,10.10\n"
+    text = "field,value\ninvoice_number,1\nvendor,A\nitem,W\nquantity,1\n"
+    text += "unit_price,10.10\ntotal,10.10\n"
     inv = parse_csv(text, "x.csv").invoice
     assert inv.items[0].unit_price == D("10.10") and inv.total == D("10.10")
 
