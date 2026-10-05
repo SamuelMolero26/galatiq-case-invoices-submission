@@ -1,0 +1,28 @@
+[project]
+name = "invoice-pipeline"
+version = "0.1.0"
+description = "Invoice processing pipeline: Ingestion, Validation, Approval, Payment"
+requires-python = ">=3.14"
+dependencies = [
+    "pdfplumber>=0.11",
+    "pydantic>=2.12",
+    "rich>=14",
+]
+
+[project.optional-dependencies]
+tui = ["textual>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "slow: needs a live LLM provider (Ollama or Grok); skipped without configuration",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = ["openspec", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
