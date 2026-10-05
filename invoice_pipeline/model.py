@@ -1,10 +1,13 @@
 """Typed contract shared by every stage. Severity is defined once, in `SEVERITY`."""
 
+import datetime as dt
 import re
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum, auto
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator
 
@@ -154,3 +157,142 @@ class Ingested(BaseModel):
     unreadable_reason: str | None = None  # "<step>: <ErrorType>: <message>" when invoice is None
     raw_text: str | None = None  # TXT / PDF text layer; input of the Extraction Fallback
     missing_required: list[Literal["vendor", "invoice_number", "total", "items"]] = []
+
+
+class UsdEquivalent(BaseModel):
+    amount: Decimal
+    rate: Decimal
+    as_of: date
+    buffer: Decimal
+
+
+class References(BaseModel):
+    """What each Warning was measured against (the Case File states it; no model arithmetic)."""
+
+    reference_prices: dict[str, Decimal]  # sku -> catalog unit price, invoiced SKUs only
+    stock_levels: dict[str, Decimal]  # sku -> Stock Level, invoiced SKUs only
+    aggregated_quantities: dict[str, Decimal]  # valid quantities per invoiced SKU
+    price_tolerance: Decimal
+    price_deviations: dict[int, Decimal]  # line index -> |unit - ref| / ref (0.20 = 20%)
+    usd_equivalent: UsdEquivalent | None  # empty until Reference Rates exist (slice 3)
+    heightened_scrutiny_line: Decimal
+
+
+class HistoryEntry(BaseModel, frozen=True):
+    """One prior Ledger arrival of a vendor, as the Critic sees it."""
+
+    number: str
+    total: Decimal | None
+    currency: str
+    state: str  # arrivals.state, e.g. "paid", "logged_rejection"
+    date: dt.date | None  # invoice date of that arrival
+
+
+class ArrivalSummary(BaseModel):
+    """`ledger.classify()` result as the Case File carries it."""
+
+    kind: Literal["new", "duplicate", "revision", "supersedes"]
+    duplicate_of: int | None = None
+    paid_to_date: Decimal | None = None  # claimed amount for duplicate/revision
+    amount_due: Decimal | None = None
+
+
+class CaseFile(BaseModel):
+    invoice: Invoice
+    findings: list[Finding]
+    arrival: ArrivalSummary
+    decision_context: list[str] = []  # precedence row + reasons; advisory reasoning only
+    checklist: dict[FindingCode, tuple[str, ...]] = {}  # only the Warnings present
+    references: References
+    vendor_history: list[HistoryEntry]  # newest first, at most VENDOR_HISTORY_LIMIT
+    vendor_history_total: int  # all prior arrivals of this vendor (may exceed the list)
+
+
+class LLMExchange(BaseModel):
+    """One chat-completions request."""
+
+    raw_answer: str | None  # None when nothing arrived
+    error: str | None  # "offline tier", timeout, LLMError, schema error
+    called_at: dt.datetime
+    elapsed_ms: int | None
+
+
+class Try(BaseModel):
+    """One Correction Wrapper try."""
+
+    exchanges: list[LLMExchange]
+    correction: str | None = None  # corrective message sent after this try failed
+
+
+class RoleCall(BaseModel):
+    """Audit record of a single-call role (escalate-only, advisory, extraction)."""
+
+    role: Literal["escalate_review", "advisory", "extraction"]
+    tier: str
+    model: str | None
+    tries: list[Try]
+    answer: dict[str, Any] | None  # parsed answer, or None (error says why)
+    error: str | None = None
+
+
+class Outcome(StrEnum):
+    APPROVED = "approved"
+    NEEDS_REVIEW = "needs_review"
+    REJECTED = "rejected"
+    DUPLICATE = "duplicate"
+
+
+class Decision(BaseModel):
+    outcome: Outcome
+    reasons: list[str]  # codes / rule names / failing Warnings that drove it
+    precedence_row: int  # the six rows of the Rule Engine
+    decided_by: Literal["rule_engine", "llm_critic"]
+    duplicate_of: int | None = None  # row 1 only
+    escalate_review: RoleCall | None = None  # row 6
+    advisory: RoleCall | None = None  # rows 2-5 without the full gate; never read by decide
+    bound_failures: list[str] = []  # Critic Bound failures (row 5); no full gate when non-empty
+    unreviewed_warnings: bool = False
+
+
+@dataclass(frozen=True)
+class Agents:
+    """Model roles injected into `approval.decide`; scripted fakes in tests.
+
+    Slice 1 supplies offline callables. Callable signatures are tightened when the
+    full-gate contracts arrive (assess/verify), without changing these fields.
+    """
+
+    assess: Callable[..., Any]
+    verify: Callable[..., Any]
+    escalate_review: Callable[[CaseFile], RoleCall]
+    advise: Callable[[CaseFile, Decision], RoleCall]
+    on_step: Callable[[str, dict], None] = field(default=lambda event, detail: None)
+
+
+class PaymentIssue(BaseModel):
+    what: str
+    when: dt.datetime
+    bank_response: dict[str, Any] | None = None
+
+
+class QueueItem(BaseModel):
+    """One Review Queue row as presenters see it."""
+
+    arrival_id: int
+    vendor: str | None
+    invoice_number: str | None
+    source: str
+    total: Decimal | None
+    currency: str | None
+    state: str
+    reasons: list[str]
+    payment_issue: PaymentIssue | None = None
+
+
+@dataclass(frozen=True)
+class Event:
+    """Pipeline event delivered through `Runtime.on_event`."""
+
+    name: str
+    file: str
+    detail: dict[str, Any] = field(default_factory=dict)
