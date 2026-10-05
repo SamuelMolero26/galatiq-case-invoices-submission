@@ -12,6 +12,8 @@ def validate(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     findings += _identity(invoice)
     findings += _vendor(invoice, catalog)
     findings += _items(invoice, catalog)
+    findings += _payable(invoice)
+    findings += reconcile(invoice)[0]
     return findings
 
 
@@ -87,3 +89,81 @@ def _items(invoice: Invoice, catalog: Catalog) -> list[Finding]:
                 )
             )
     return findings
+
+
+def _m(amount: Decimal) -> str:
+    return f"{amount:.2f}"
+
+
+def _payable(invoice: Invoice) -> list[Finding]:
+    """Missing or nonpositive payable amounts fail closed; nothing is derived or guessed."""
+    findings: list[Finding] = []
+    if invoice.total is None:
+        findings.append(finding(FindingCode.MISSING_REQUIRED_FIELD, "invoice total missing"))
+    elif invoice.total <= 0:
+        findings.append(
+            finding(
+                FindingCode.NONPOSITIVE_TOTAL, f"stated total {_m(invoice.total)} cannot be paid"
+            )
+        )
+    for index, item in enumerate(invoice.items):
+        if item.unit_price is None:
+            findings.append(
+                finding(FindingCode.MISSING_REQUIRED_FIELD, "unit price missing", line=index)
+            )
+    return findings
+
+
+def reconcile(invoice: Invoice) -> tuple[list[Finding], list[str]]:
+    """Exact Reconciliation: (findings, notes). Notes record derived or unverifiable amounts."""
+    findings: list[Finding] = []
+    notes: list[str] = []
+    amounts: list[Decimal] = []
+    derived: list[str] = []
+    verifiable = True
+    for index, item in enumerate(invoice.items):
+        if item.quantity is None or item.unit_price is None:
+            verifiable = False
+            notes.append(f"line {index}: amount cannot be known; tie-outs not verifiable")
+            continue
+        expected = item.quantity * item.unit_price
+        if item.line_total is None:
+            derived.append(f"line {index} amount derived: {_m(expected)}")
+            notes.append(derived[-1])
+            amounts.append(expected)
+            continue
+        amounts.append(item.line_total)
+        if item.line_total != expected:
+            findings.append(
+                finding(
+                    FindingCode.RECONCILIATION_MISMATCH,
+                    f"line {index}: {item.quantity} x {_m(item.unit_price)} = {_m(expected)} "
+                    f"but stated line amount is {_m(item.line_total)}",
+                    line=index,
+                )
+            )
+    if not verifiable:
+        return findings, notes
+    suffix = f" ({'; '.join(derived)})" if derived else ""
+    lines_sum = sum(amounts, Decimal(0))
+    if invoice.subtotal is not None and lines_sum != invoice.subtotal:
+        findings.append(
+            finding(
+                FindingCode.RECONCILIATION_MISMATCH,
+                f"subtotal: lines sum to {_m(lines_sum)} but stated subtotal is "
+                f"{_m(invoice.subtotal)}{suffix}",
+            )
+        )
+    if invoice.total is not None:
+        base = invoice.subtotal if invoice.subtotal is not None else lines_sum
+        tax, shipping = invoice.tax or Decimal(0), invoice.shipping or Decimal(0)
+        expected_total = base + tax + shipping
+        if expected_total != invoice.total:
+            findings.append(
+                finding(
+                    FindingCode.RECONCILIATION_MISMATCH,
+                    f"total: {_m(base)} + tax {_m(tax)} + shipping {_m(shipping)} = "
+                    f"{_m(expected_total)} but stated total is {_m(invoice.total)}{suffix}",
+                )
+            )
+    return findings, notes
