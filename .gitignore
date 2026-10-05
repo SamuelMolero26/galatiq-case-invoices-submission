@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.atl/
+.pytest_cache/
+.ruff_cache/
+*.db
+*.db-wal
+*.db-shm
