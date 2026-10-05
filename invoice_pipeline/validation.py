@@ -1,12 +1,18 @@
 """Validation: checks an Invoice against the Catalog and emits Findings. It never decides."""
 
+import re
 from collections import defaultdict
 from decimal import Decimal
+from difflib import SequenceMatcher
 
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.model import Finding, FindingCode, Invoice, finding, vendor_key
 
 PRICE_TOLERANCE = Decimal("0.15")  # the single price-tolerance constant
+VENDOR_LOOKALIKE_THRESHOLD = 0.85  # SequenceMatcher ratio at or above this is a lookalike
+_COMPANY_SUFFIXES = {
+    "inc", "incorporated", "co", "company", "corp", "corporation", "llc", "ltd", "limited",
+}  # fmt: skip
 
 
 def validate(invoice: Invoice, catalog: Catalog) -> list[Finding]:
@@ -42,7 +48,44 @@ def _vendor(invoice: Invoice, catalog: Catalog) -> list[Finding]:
         return [finding(FindingCode.VENDOR_BLOCKED, f"vendor '{invoice.vendor}' is blocked")]
     if known is not None and known.status == "trusted":
         return []
-    return [finding(FindingCode.VENDOR_UNKNOWN, f"vendor '{invoice.vendor}' is not on the list")]
+    findings = [
+        finding(FindingCode.VENDOR_UNKNOWN, f"vendor '{invoice.vendor}' is not on the list")
+    ]
+    if (lookalike := vendor_lookalike(invoice.vendor, catalog)) is not None:
+        findings.append(lookalike)
+    return findings
+
+
+def _comparison_name(name: str) -> str:
+    """Lower-cased, punctuation removed, whitespace collapsed, trailing company suffixes dropped."""
+    tokens = re.sub(r"[^\w\s]", "", name.casefold()).split()
+    while tokens and tokens[-1] in _COMPANY_SUFFIXES:
+        tokens.pop()
+    return " ".join(tokens)
+
+
+def vendor_lookalike(vendor: str | None, catalog: Catalog) -> Finding | None:
+    """Review Trigger when a not-exactly-known vendor resembles a trusted or blocked one."""
+    key = vendor_key(vendor)
+    if key is None or key in catalog.vendors and catalog.vendors[key].status != "unknown":
+        return None
+    name = _comparison_name(vendor)
+    if not name:
+        return None
+    scored = sorted(
+        (
+            -SequenceMatcher(None, name, _comparison_name(known.display_name)).ratio(),
+            known.display_name,
+        )
+        for known in catalog.vendors.values()
+        if known.status in ("trusted", "blocked") and _comparison_name(known.display_name)
+    )
+    if not scored or -scored[0][0] < VENDOR_LOOKALIKE_THRESHOLD:
+        return None
+    return finding(
+        FindingCode.VENDOR_LOOKALIKE,
+        f"resembles known vendor '{scored[0][1]}' (score {-scored[0][0]:.2f})",
+    )
 
 
 def _valid_quantity(quantity: Decimal | None) -> bool:
