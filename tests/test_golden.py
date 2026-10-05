@@ -1,8 +1,9 @@
-"""Slice 1a golden pipeline test: the offline batch over data/invoices/ (read-only).
+"""Slice 1 golden pipeline test: the offline batch over data/invoices/ (read-only).
 
 Expectations come from `tests/golden` (transcribed from the cli-runner spec table), never from
-observed output. Rows owned by slice 1b (CSV) and slice 3 (Revision, Superseded, XML in EUR) are
-not asserted here; `test_later_slices_are_deferred_explicitly` pins that partition.
+observed output. Slice-1 rows are 1a (TXT, JSON, PDF) and 1b (CSV). Rows owned by slice 3
+(Revision, Superseded, XML in EUR) are not asserted here;
+`test_later_slices_are_deferred_explicitly` pins that partition.
 """
 
 import argparse
@@ -20,7 +21,7 @@ from invoice_pipeline.model import FindingCode as F
 from tests.golden import ROWS, Final, rows_for
 
 CORPUS = Path(__file__).parent.parent / "data" / "invoices"
-ROWS_1A = rows_for("1a")
+ROWS_1A = sorted(rows_for("1a") + rows_for("1b"), key=lambda r: r.arrival)  # slice 1 rows
 STATE = {
     Final.PAID: "paid",
     Final.NEEDS_REVIEW: "needs_review",
@@ -32,7 +33,7 @@ row_ids = [f"row{r.n}-{r.arrival}" for r in ROWS_1A]
 
 
 class Run:
-    """The slice-1a corpus batch on fresh temp databases with a recording, succeeding bank."""
+    """The slice-1 corpus batch on fresh temp databases with a recording, succeeding bank."""
 
     def __init__(self, tmp_path):
         args = argparse.Namespace(
@@ -64,17 +65,18 @@ def run(tmp_path, no_network):
     return Run(tmp_path)
 
 
-def test_the_batch_is_the_1a_rows_in_lexical_arrival_order_and_none_fail(run):
+def test_the_batch_is_the_slice_1_rows_in_lexical_arrival_order_and_none_fail(run):
     assert run.paths == sorted(run.paths)
-    assert [r.n for r in ROWS_1A] == [1, 2, 3, 4, 6, 9, 10, 11, 12, 13, 14, 15, 20]
+    assert [r.n for r in ROWS_1A] == [1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19, 20]
     assert run.batch.failed == [] and len(run.batch.results) == len(ROWS_1A)
     assert [r.source for r in run.batch.results] == [r.arrival for r in ROWS_1A]
 
 
 def test_later_slices_are_deferred_explicitly():
     assert [r.n for r in rows_for("1b")] == [7, 8, 19]  # CSV: README scenario 1006 lives here
+    assert not {r.n for r in rows_for("3")} & {r.n for r in ROWS_1A}
     assert [r.n for r in rows_for("3")] == [5, 16, 17, 18]  # Revision, Superseded, EUR XML
-    assert len(ROWS_1A) + len(rows_for("1b")) + len(rows_for("3")) == len(ROWS) == 20
+    assert len(ROWS_1A) + len(rows_for("3")) == len(ROWS) == 20
 
 
 @pytest.mark.parametrize("row", ROWS_1A, ids=row_ids)
@@ -98,16 +100,18 @@ def test_each_row_ends_in_its_source_derived_outcome(run, row):
         ]
 
 
-def test_readme_scenarios_that_slice_1a_covers(run):
+def test_readme_scenarios_that_slice_1_covers(run):
     def codes(name):
         return {F(c) for c in run.by_file[name].finding_codes}
 
-    for clean in ("invoice_1001.txt", "invoice_1004.json"):  # 1006 (CSV) is slice 1b
+    for clean in ("invoice_1001.txt", "invoice_1004.json", "invoice_1006.csv"):
         assert run.by_file[clean].finding_codes == [] and run.by_file[clean].state == "paid"
     assert F.STOCK_SHORTAGE in codes("invoice_1002.txt")
     assert run.by_file["invoice_1002.txt"].decision == "needs_review"
     assert F.ITEM_ZERO_STOCK in codes("invoice_1003.txt")
     assert run.by_file["invoice_1003.txt"].decision == "rejected"
+    assert F.STOCK_SHORTAGE in codes("invoice_1007.csv")
+    assert run.by_file["invoice_1007.csv"].decision == "needs_review"
     assert F.ITEM_UNKNOWN in codes("invoice_1008.txt")  # 1008; 1016 below
     assert F.ITEM_UNKNOWN in codes("invoice_1016.json")
     assert {F.QUANTITY_INVALID, F.PARTIAL_IDENTITY} <= codes("invoice_1009.json")
@@ -125,11 +129,13 @@ def test_duplicate_precedence_makes_no_model_call_and_no_payment(run):
             "none",
         )
         assert decision["escalate_review"] is None and decision["advisory"] is None
-    assert run.calls == [  # only the four Paid rows moved money, in arrival order
+    assert run.calls == [  # only the six Paid rows moved money, in arrival order
         ("Widgets Inc.", Decimal("5000.00"), "USD"),
         ("Precision Parts Ltd.", Decimal("1890.00"), "USD"),
+        ("Acme Industrial Supplies", Decimal("2750.00"), "USD"),
         ("Summit Manufacturing Co.", Decimal("3000.00"), "USD"),
         ("QuickShip Distributers", Decimal("9975.00"), "USD"),
+        ("Reliable Components Inc.", Decimal("6500.00"), "USD"),
     ]
 
 
@@ -141,13 +147,13 @@ def test_a_duplicate_carrying_a_rejection_rule_is_still_a_duplicate(run, tmp_pat
     result = service.process_path(copy, run.rt)
     assert (result.state, result.precedence_row) == ("duplicate", 1)
     assert F.ITEM_UNKNOWN.value in result.finding_codes  # recorded, but it does not outrank
-    assert len(run.calls) == 4
+    assert len(run.calls) == 6
 
 
 def test_final_state_per_identity_and_counts_match_the_table(run):
     counts = Counter(r["state"] for r in run.db().values())
     assert counts == Counter(STATE[r.outcome] for r in ROWS_1A)
-    assert counts == {"paid": 4, "needs_review": 3, "logged_rejection": 4, "duplicate": 2}
+    assert counts == {"paid": 6, "needs_review": 4, "logged_rejection": 4, "duplicate": 2}
     paid_by_identity = {}
     for row in run.db().values():
         if row["state"] == "paid":
@@ -160,6 +166,7 @@ def test_final_state_per_identity_and_counts_match_the_table(run):
     assert [i.source for i in queue] == [
         "invoice_1002.txt",
         "invoice_1005.json",
+        "invoice_1007.csv",
         "invoice_1010.txt",
     ]
     assert "payment_pending" not in counts
@@ -182,9 +189,9 @@ def test_second_run_moves_no_money_and_copies_of_paid_identities_become_duplicat
         if r["state"] == "paid"
     }
     again = service.run_batch(run.paths, run.rt)
-    assert again.failed == [] and len(run.calls) == 4  # no payment callable invocation
+    assert again.failed == [] and len(run.calls) == 6  # no payment callable invocation
     paid_files = {"invoice_1001.txt", "invoice_1004.json", "invoice_1011.pdf", "invoice_1011.txt"}
-    paid_files |= {"invoice_1012.pdf", "invoice_1012.txt"}
+    paid_files |= {"invoice_1012.pdf", "invoice_1012.txt", "invoice_1006.csv", "invoice_1015.csv"}
     db = run.db()
     for result in again.results:
         row = db[result.arrival_id]
@@ -195,7 +202,7 @@ def test_second_run_moves_no_money_and_copies_of_paid_identities_become_duplicat
                 None,
             )
     assert Counter(r.state for r in again.results if r.source not in paid_files) == Counter(
-        needs_review=3, logged_rejection=4
+        needs_review=4, logged_rejection=4
     )
     paid_now = {
         (r["vendor_key"], r["invoice_number"]): (r["id"], r["amount_paid"])
@@ -209,3 +216,12 @@ def test_the_network_guard_was_live_for_the_whole_run(run):
     with pytest.raises(AssertionError, match="network access attempted"):
         socket.socket()
     assert run.batch.failed == []
+
+
+def test_pre_rate_eur_goes_to_review_with_no_rate_finding(run):
+    result = service.process_path(
+        CORPUS / "invoice_1014.xml", run.rt
+    )  # row 18: asserted in slice 3
+    assert result.state == "needs_review"
+    assert {F.CURRENCY_NON_USD.value, F.CURRENCY_NO_RATE.value} <= set(result.finding_codes)
+    assert len(run.calls) == 6  # no payment attempted for the unsupported currency
