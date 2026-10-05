@@ -29,7 +29,7 @@ def test_ties_out_with_subtotal_tax_and_shipping():
 
 
 def test_no_subtotal_no_tax():
-    items = [make_item(qty="6", price="250.00"), make_item(qty="3", price="500.00")]
+    items = [make_item(qty="6", price="250.00"), make_item("WidgetB", qty="3", price="500.00")]
     assert run(make_invoice(items, subtotal=None, total="3000.00")) == []
 
 

@@ -6,6 +6,8 @@ from decimal import Decimal
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.model import Finding, FindingCode, Invoice, finding, vendor_key
 
+PRICE_TOLERANCE = Decimal("0.15")  # the single price-tolerance constant
+
 
 def validate(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     findings: list[Finding] = []
@@ -14,6 +16,7 @@ def validate(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     findings += _items(invoice, catalog)
     findings += _payable(invoice)
     findings += reconcile(invoice)[0]
+    findings += _prices(invoice, catalog)
     return findings
 
 
@@ -167,3 +170,39 @@ def reconcile(invoice: Invoice) -> tuple[list[Finding], list[str]]:
                 )
             )
     return findings, notes
+
+
+def _signed_deviations(invoice: Invoice, catalog: Catalog) -> dict[int, tuple[Decimal, Decimal]]:
+    """line index -> (signed deviation, reference price) for USD lines with a reference price."""
+    if invoice.currency != "USD":
+        return {}  # no conversion is ever performed, so non-USD lines are not compared
+    result = {}
+    for index, item in enumerate(invoice.items):
+        sku = catalog.resolve_sku(item.sku)
+        reference = catalog.prices.get(sku) if sku else None
+        if reference and item.unit_price is not None:
+            result[index] = ((item.unit_price - reference) / reference, reference)
+    return result
+
+
+def price_deviations(invoice: Invoice, catalog: Catalog) -> dict[int, Decimal]:
+    """line index -> absolute deviation for lines beyond tolerance (Case File references)."""
+    return {
+        index: abs(deviation)
+        for index, (deviation, _) in _signed_deviations(invoice, catalog).items()
+        if abs(deviation) > PRICE_TOLERANCE
+    }
+
+
+def _prices(invoice: Invoice, catalog: Catalog) -> list[Finding]:
+    signed = _signed_deviations(invoice, catalog)
+    return [
+        finding(
+            FindingCode.PRICE_DEVIATION,
+            f"unit price {_m(invoice.items[index].unit_price)} "
+            f"vs reference {_m(signed[index][1])}: "
+            f"{signed[index][0] * 100:+.2f}%, tolerance {PRICE_TOLERANCE * 100:.0f}%",
+            line=index,
+        )
+        for index in price_deviations(invoice, catalog)
+    ]
