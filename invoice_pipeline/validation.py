@@ -72,19 +72,22 @@ def vendor_lookalike(vendor: str | None, catalog: Catalog) -> Finding | None:
     name = _comparison_name(vendor)
     if not name:
         return None
-    scored = sorted(
-        (
-            -SequenceMatcher(None, name, _comparison_name(known.display_name)).ratio(),
-            known.display_name,
-        )
+    candidates = sorted(  # max() keeps the first of equal scores: ties resolve by name
+        known.display_name
         for known in catalog.vendors.values()
         if known.status in ("trusted", "blocked") and _comparison_name(known.display_name)
     )
-    if not scored or -scored[0][0] < VENDOR_LOOKALIKE_THRESHOLD:
+    if not candidates:
+        return None
+
+    def score(display_name: str) -> float:
+        return SequenceMatcher(None, name, _comparison_name(display_name)).ratio()
+
+    best = max(candidates, key=score)
+    if score(best) < VENDOR_LOOKALIKE_THRESHOLD:
         return None
     return finding(
-        FindingCode.VENDOR_LOOKALIKE,
-        f"resembles known vendor '{scored[0][1]}' (score {-scored[0][0]:.2f})",
+        FindingCode.VENDOR_LOOKALIKE, f"resembles known vendor '{best}' (score {score(best):.2f})"
     )
 
 
@@ -104,7 +107,9 @@ def aggregate_quantities(invoice: Invoice, catalog: Catalog) -> dict[str, Decima
 
 def _items(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     findings: list[Finding] = []
+    zero_stock: list[Finding] = []
     unknown: set[str] = set()
+    reported_zero: set[str] = set()
     for index, item in enumerate(invoice.items):
         if not _valid_quantity(item.quantity):
             token = item.raw_quantity if item.raw_quantity is not None else "missing"
@@ -115,22 +120,20 @@ def _items(invoice: Invoice, catalog: Catalog) -> list[Finding]:
                     line=index,
                 )
             )
-        if catalog.resolve_sku(item.sku) is None:
+        sku = catalog.resolve_sku(item.sku)
+        if sku is None:
             name = item.sku or item.raw_name
             if name not in unknown:
                 unknown.add(name)
                 findings.append(
                     finding(FindingCode.ITEM_UNKNOWN, f"item '{name}' is not in inventory", index)
                 )
-
-    reported_zero: set[str] = set()
-    for index, item in enumerate(invoice.items):
-        sku = catalog.resolve_sku(item.sku)
-        if sku is not None and catalog.stock.get(sku) == 0 and sku not in reported_zero:
+        elif catalog.stock.get(sku) == 0 and sku not in reported_zero:
             reported_zero.add(sku)
-            findings.append(
+            zero_stock.append(
                 finding(FindingCode.ITEM_ZERO_STOCK, f"item '{sku}' has Stock Level 0", index)
             )
+    findings += zero_stock
     for sku, quantity in aggregate_quantities(invoice, catalog).items():
         level = catalog.stock.get(sku)
         if level is not None and level > 0 and quantity > level:
@@ -221,8 +224,8 @@ def reconcile(invoice: Invoice) -> tuple[list[Finding], list[str]]:
     return findings, notes
 
 
-def _signed_deviations(invoice: Invoice, catalog: Catalog) -> dict[int, tuple[Decimal, Decimal]]:
-    """line index -> (signed deviation, reference price) for USD lines with a reference price."""
+def _deviations(invoice: Invoice, catalog: Catalog) -> dict[int, tuple[Decimal, Decimal]]:
+    """line index -> (absolute deviation, reference price) for USD lines beyond tolerance."""
     if invoice.currency != "USD":
         return {}  # no conversion is ever performed, so non-USD lines are not compared
     result = {}
@@ -230,30 +233,29 @@ def _signed_deviations(invoice: Invoice, catalog: Catalog) -> dict[int, tuple[De
         sku = catalog.resolve_sku(item.sku)
         reference = catalog.prices.get(sku) if sku else None
         if reference and item.unit_price is not None:
-            result[index] = ((item.unit_price - reference) / reference, reference)
+            deviation = (item.unit_price - reference) / reference
+            if abs(deviation) > PRICE_TOLERANCE:
+                result[index] = (deviation, reference)
     return result
 
 
 def price_deviations(invoice: Invoice, catalog: Catalog) -> dict[int, Decimal]:
     """line index -> absolute deviation for lines beyond tolerance (Case File references)."""
     return {
-        index: abs(deviation)
-        for index, (deviation, _) in _signed_deviations(invoice, catalog).items()
-        if abs(deviation) > PRICE_TOLERANCE
+        index: abs(deviation) for index, (deviation, _) in _deviations(invoice, catalog).items()
     }
 
 
 def _prices(invoice: Invoice, catalog: Catalog) -> list[Finding]:
-    signed = _signed_deviations(invoice, catalog)
     return [
         finding(
             FindingCode.PRICE_DEVIATION,
             f"unit price {_m(invoice.items[index].unit_price)} "
-            f"vs reference {_m(signed[index][1])}: "
-            f"{signed[index][0] * 100:+.2f}%, tolerance {PRICE_TOLERANCE * 100:.0f}%",
+            f"vs reference {_m(reference)}: "
+            f"{deviation * 100:+.2f}%, tolerance {PRICE_TOLERANCE * 100:.0f}%",
             line=index,
         )
-        for index in price_deviations(invoice, catalog)
+        for index, (deviation, reference) in _deviations(invoice, catalog).items()
     ]
 
 
