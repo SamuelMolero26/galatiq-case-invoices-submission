@@ -254,31 +254,35 @@ def collect_files(path: Path | str) -> list[Path]:
     return sorted(p for p in path.iterdir() if p.is_file()) if path.is_dir() else [path]
 
 
-def process_path(path: Path | str, rt: Runtime) -> ArrivalResult:
-    """Ingest, decide, record and (when Approved) pay one file; a failure records nothing."""
+def process_path(path: Path | str, rt: Runtime) -> list[ArrivalResult]:
+    """Ingest one file, then decide, record and (when Approved) pay each invoice in it
+    independently; a failure records nothing for that invoice and stops the rest of the file."""
     path = Path(path)
-    ingested = ingestion.ingest(path)
-    rt.on_event(Event("ingested", path.name, {"unreadable": ingested.invoice is None}))
     conn = ledger.connect(rt.ledger_path)
     try:
-        if ingested.invoice is None:
-            with _stage(path.name, "approval"):
-                decision = decide_unreadable(ingested.findings)
-            new = ledger.Arrival(path.name, rt.now(), ingested, ingested.findings, decision, None)
-            with _stage(path.name, "ledger"):
-                arrival_id = ledger.record(conn, new)
-        else:
-            arrival_id = record_arrival(conn, ingested, path.name, rt)
-        result = arrival_result(conn, arrival_id)
-        rt.on_event(
-            Event("decided", path.name, {"outcome": result.decision, "row": result.precedence_row})
-        )
-        if result.state == "payment_pending":  # Approved and claimed
-            pay_claimed(conn, arrival_id, rt, path.name)
-            result = arrival_result(conn, arrival_id)
-        return result
+        return [_process_one(conn, ingested, path.name, rt) for ingested in ingestion.ingest(path)]
     finally:
         conn.close()
+
+
+def _process_one(conn, ingested: Ingested, source: str, rt: Runtime) -> ArrivalResult:
+    rt.on_event(Event("ingested", source, {"unreadable": ingested.invoice is None}))
+    if ingested.invoice is None:
+        with _stage(source, "approval"):
+            decision = decide_unreadable(ingested.findings)
+        new = ledger.Arrival(source, rt.now(), ingested, ingested.findings, decision, None)
+        with _stage(source, "ledger"):
+            arrival_id = ledger.record(conn, new)
+    else:
+        arrival_id = record_arrival(conn, ingested, source, rt)
+    result = arrival_result(conn, arrival_id)
+    rt.on_event(
+        Event("decided", source, {"outcome": result.decision, "row": result.precedence_row})
+    )
+    if result.state == "payment_pending":  # Approved and claimed
+        pay_claimed(conn, arrival_id, rt, source)
+        result = arrival_result(conn, arrival_id)
+    return result
 
 
 @dataclass(frozen=True)
@@ -295,7 +299,7 @@ def run_batch(paths: list[Path], rt: Runtime) -> BatchResult:
     results, failed = [], []
     for path in paths:
         try:
-            results.append(process_path(path, rt))
+            results.extend(process_path(path, rt))
         except Exception as exc:
             failure = (
                 exc

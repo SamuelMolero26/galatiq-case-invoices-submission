@@ -11,7 +11,8 @@ D = Decimal
 
 
 def csv_doc(name: str):
-    return parse_csv((CORPUS / name).read_text(), name)
+    (result,) = parse_csv((CORPUS / name).read_text(), name)
+    return result
 
 
 def xml_doc(name: str = "invoice_1014.xml"):
@@ -47,8 +48,60 @@ def test_csv_row_per_line_shape_with_footer_rows_1007():
 def test_csv_money_is_exact_decimal():
     text = "field,value\ninvoice_number,1\nvendor,A\nitem,W\nquantity,1\n"
     text += "unit_price,10.10\ntotal,10.10\n"
-    inv = parse_csv(text, "x.csv").invoice
+    (result,) = parse_csv(text, "x.csv")
+    inv = result.invoice
     assert inv.items[0].unit_price == D("10.10") and inv.total == D("10.10")
+
+
+ROW_HEADER = "Invoice Number,Vendor,Date,Due Date,Item,Qty,Unit Price,Line Total\n"
+
+
+def test_csv_blank_number_row_with_line_content_continues_the_invoice_above():
+    text = ROW_HEADER + "INV-1,Acme,01/28/2026,02/28/2026,WidgetA,2,10.00,20.00\n"
+    text += ",,,,WidgetB,1,5.00,5.00\n,,,,,,Total:,25.00\n"
+    (result,) = parse_csv(text, "x.csv")
+    inv = result.invoice
+    assert (inv.invoice_number, inv.vendor, inv.invoice_date) == (
+        "INV-1",
+        "Acme",
+        date(2026, 1, 28),
+    )
+    assert [(i.sku, i.line_total) for i in inv.items] == [
+        ("WidgetA", D("20.00")),
+        ("WidgetB", D("5.00")),
+    ]
+    assert inv.total == D("25.00")
+
+
+def test_csv_footer_label_is_read_from_any_column():
+    text = ROW_HEADER + "INV-1,Acme,01/28/2026,02/28/2026,WidgetA,2,10.00,20.00\n"
+    text += ",Subtotal,,,,,,20.00\n,,,TAX (0%):,,,,0.00\n,,,,,,,20.00\n,Total,,,,,,20.00\n"
+    (result,) = parse_csv(text, "x.csv")
+    inv = result.invoice
+    assert (inv.subtotal, inv.tax, inv.total) == (D("20.00"), D("0.00"), D("20.00"))
+    assert len(inv.items) == 1
+
+
+def test_csv_currency_column_is_mapped():
+    text = "Invoice Number,Vendor,Currency,Item,Qty,Unit Price,Line Total\n"
+    text += "INV-1,Acme,eur,WidgetA,2,10.00,20.00\n"
+    (result,) = parse_csv(text, "x.csv")
+    assert result.invoice.currency == "EUR"
+
+
+def test_csv_two_invoice_numbers_become_two_invoices():
+    text = ROW_HEADER + "INV-1,Acme,01/28/2026,02/28/2026,WidgetA,2,10.00,20.00\n"
+    text += ",,,,,,Total:,20.00\n"
+    text += "INV-2,Globex,01/29/2026,02/28/2026,WidgetB,1,5.00,5.00\n"
+    text += "INV-2,Globex,01/29/2026,02/28/2026,GadgetX,1,7.00,7.00\n"
+    text += ",,,,,,Total:,12.00\n"
+    first, second = parse_csv(text, "x.csv")
+    assert (first.invoice.invoice_number, first.invoice.vendor) == ("INV-1", "Acme")
+    assert [i.sku for i in first.invoice.items] == ["WidgetA"]
+    assert first.invoice.total == D("20.00")
+    assert (second.invoice.invoice_number, second.invoice.vendor) == ("INV-2", "Globex")
+    assert [i.sku for i in second.invoice.items] == ["WidgetB", "GadgetX"]
+    assert second.invoice.total == D("12.00")
 
 
 def test_xml_nested_structure_and_eur_metadata_1014():

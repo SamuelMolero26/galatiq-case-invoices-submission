@@ -102,18 +102,31 @@ _ROW_COLUMNS = {
     "qty": "quantity",
     "unit price": "unit_price",
     "line total": "amount",
+    "currency": "currency",
 }
+_IDENTITY = ("invoice_number", "vendor", "date", "due_date", "currency")
 
 
-def parse_csv(text: str, source_path: str) -> Ingested:
-    """CSV in two shapes: field/value rows (repeated item groups) or one row per line item."""
+def _footer_label(cell: str) -> str | None:
+    """'Subtotal', 'Tax (6%):', 'TOTAL' ... as the footer field name, or None."""
+    label = re.sub(r"\(.*?\)|:", "", cell).strip().lower()
+    return label if label in ("subtotal", "tax", "total") else None
+
+
+def parse_csv(text: str, source_path: str) -> list[Ingested]:
+    """CSV in two shapes: field/value rows (repeated item groups) or one row per line item.
+
+    Row shape groups rows by Invoice Number: a blank number on a row with line content continues
+    the invoice above; a footer row (Subtotal/Tax/Total label in any column, amount in the last
+    numeric cell) belongs to the invoice above. Each invoice number becomes its own invoice.
+    """
     rows = [r for r in csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]
     if not rows:
         raise ValueError("no CSV rows")
     header = [c.strip().lower() for c in rows[0]]
-    data: dict = {}
-    lines: list[dict] = []
     if header[:2] == ["field", "value"]:
+        data: dict = {}
+        lines: list[dict] = []
         for row in rows[1:]:
             key, value = row[0].strip().lower(), row[1] if len(row) > 1 else ""
             if key == "item":
@@ -122,19 +135,33 @@ def parse_csv(text: str, source_path: str) -> Ingested:
                 lines[-1][key] = value
             else:
                 data[key] = value
-    else:
-        cols = {_ROW_COLUMNS[h]: i for i, h in enumerate(header) if h in _ROW_COLUMNS}
-        for row in rows[1:]:
-            cells = {k: row[i].strip() if i < len(row) else "" for k, i in cols.items()}
-            if cells.get("invoice_number"):
-                for key in ("invoice_number", "vendor", "date", "due_date"):
-                    data.setdefault(key, cells.get(key))
-                lines.append(cells)
-            else:  # footer row: label in the Unit Price column, amount in Line Total
-                label = re.sub(r"\(.*?\)|:", "", cells.get("unit_price", "")).strip().lower()
-                if label in ("subtotal", "tax", "total"):
-                    data[label] = cells.get("amount")
-    return _build(data, lines, source_path, "csv")
+        return [_build(data, lines, source_path, "csv")]
+    cols = {_ROW_COLUMNS[h]: i for i, h in enumerate(header) if h in _ROW_COLUMNS}
+    groups: dict[str | None, tuple[dict, list[dict]]] = {}  # invoice number -> (fields, lines)
+    current: str | None = None
+    for row in rows[1:]:
+        cells = {k: row[i].strip() if i < len(row) else "" for k, i in cols.items()}
+        has_line = any(
+            cells.get(k) and not _footer_label(cells[k]) for k in ("item", "quantity", "unit_price")
+        )
+        label = next((x for c in row if (x := _footer_label(c))), None)
+        if not has_line and label:
+            if groups:
+                amounts = [c.strip() for c in row if re.fullmatch(r"[^A-Za-z]*\d[^A-Za-z]*", c)]
+                groups[current][0][label] = amounts[-1] if amounts else None
+            continue
+        if not has_line:
+            continue
+        if cells.get("invoice_number"):
+            current = cells["invoice_number"]
+        data, lines = groups.setdefault(current, ({}, []))
+        for key in _IDENTITY:  # blank cells inherit the identity from the rows above
+            if cells.get(key) and not data.get(key):
+                data[key] = cells[key]
+        lines.append(cells)
+    if not groups:
+        raise ValueError("no CSV line rows")
+    return [_build(data, lines, source_path, "csv") for data, lines in groups.values()]
 
 
 def parse_xml(text: str, source_path: str) -> Ingested:
