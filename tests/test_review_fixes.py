@@ -4,8 +4,12 @@ import dataclasses
 import io
 import logging
 import shutil
+import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from invoice_pipeline import cli, ledger, service
 
@@ -81,3 +85,40 @@ def test_a_failing_invoice_keeps_the_other_invoices_of_its_file(tmp_path, monkey
     assert [r.invoice_number for r in batch.results] == ["INV-1015", "INV-9002"]
     assert batch.results[0].state == "paid"
     assert [(f.file, f.stage) for f in batch.failed] == [("three.csv", "validation")]
+
+
+def test_an_interrupted_ledger_initialisation_leaves_nothing_half_made(tmp_path, monkeypatch):
+    path = tmp_path / "ledger.db"
+    monkeypatch.setattr(ledger, "_SCHEMA", ledger._SCHEMA + "; NOT VALID SQL")
+    with pytest.raises(sqlite3.Error):
+        ledger.connect(path)
+    monkeypatch.undo()
+
+    conn = ledger.connect(path)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == ledger.SCHEMA_VERSION
+    conn.close()
+
+
+def test_concurrent_first_connects_all_open_one_initialised_ledger(tmp_path):
+    path = tmp_path / "ledger.db"
+    start, errors = threading.Barrier(8), []
+
+    def first_connect():
+        start.wait()
+        try:
+            ledger.connect(path).close()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=first_connect) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    conn = ledger.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == ledger.SCHEMA_VERSION
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    conn.close()
