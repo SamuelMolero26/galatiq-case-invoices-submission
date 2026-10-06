@@ -70,12 +70,23 @@ class LedgerError(Exception):
     """The ledger database is not the expected schema."""
 
 
-def connect(path: Path | str) -> sqlite3.Connection:
-    """Open (creating when new) a Ledger; a database with another schema version is refused."""
-    conn = sqlite3.connect(path, isolation_level=None, timeout=30)
+def connect(path: Path | str, read_only: bool = False) -> sqlite3.Connection:
+    """Open (creating when new) a Ledger; a database with another schema version is refused.
+
+    `read_only` opens an existing Ledger with `mode=ro`: nothing is created, a missing file fails.
+    """
+    if read_only:
+        uri = f"{Path(path).resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=30)
+    else:
+        conn = sqlite3.connect(path, isolation_level=None, timeout=30)
     conn.row_factory = sqlite3.Row
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version == 0 and not conn.execute("SELECT 1 FROM sqlite_master").fetchone():
+    if (
+        version == 0
+        and not read_only
+        and not conn.execute("SELECT 1 FROM sqlite_master").fetchone()
+    ):
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(_SCHEMA)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

@@ -231,13 +231,17 @@ class BootstrapError(Exception):
     """The run cannot start: unsupported tier, or a database with the wrong schema."""
 
 
+def ledger_path_of(args) -> Path:
+    return Path(args.ledger or ledger.DEFAULT_LEDGER_PATH)
+
+
 def bootstrap(args) -> Runtime:
     """Seed a missing inventory, check both schemas, and select the tier (offline only so far)."""
     tier = args.llm or "offline"
     if tier != "offline":
         raise BootstrapError(f"LLM tier {tier!r} is not available yet; use --llm offline")
     inventory = Path(args.inventory or catalog.DEFAULT_INVENTORY_PATH)
-    ledger_path = Path(args.ledger or ledger.DEFAULT_LEDGER_PATH)
+    ledger_path = ledger_path_of(args)
     try:
         if not inventory.exists():
             catalog.seed(inventory)
@@ -315,9 +319,17 @@ def run_batch(paths: list[Path], rt: Runtime) -> BatchResult:
     return BatchResult(results, failed)
 
 
-def review_queue(rt: Runtime) -> list[QueueItem]:
-    """The Review Queue (read-only): the same Ledger query every presenter uses."""
-    conn = ledger.connect(rt.ledger_path)
+def review_queue(ledger_path: Path) -> list[QueueItem]:
+    """The Review Queue: the same Ledger query every presenter uses.
+
+    Read-only: the Ledger must already exist and is never created, migrated or seeded.
+    """
+    if not ledger_path.exists():
+        raise BootstrapError(f"ledger not found: {ledger_path}")
+    try:
+        conn = ledger.connect(ledger_path, read_only=True)
+    except (ledger.LedgerError, sqlite3.Error) as exc:
+        raise BootstrapError(str(exc)) from exc
     try:
         return ledger.review_queue(conn)
     finally:

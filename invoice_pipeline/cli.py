@@ -143,11 +143,11 @@ def _run_batch(args, ui) -> int:
 
 def _list_queue(args, ui) -> int:
     try:
-        rt = service.bootstrap(args)
+        items = service.review_queue(service.ledger_path_of(args))
     except service.BootstrapError as exc:
         _error(f"cannot start: {exc}")
         return EXIT_FAILED
-    ui.queue(service.review_queue(rt))
+    ui.queue(items)
     return EXIT_OK
 
 
