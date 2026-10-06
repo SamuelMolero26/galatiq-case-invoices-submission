@@ -97,16 +97,6 @@ def write_txn(conn: sqlite3.Connection):
     conn.execute("COMMIT")
 
 
-def insert_arrival(conn: sqlite3.Connection, **cols) -> int:
-    """Insert one arrival row; it takes the next global change sequence."""
-    names = ", ".join(cols)
-    marks = ", ".join("?" * len(cols))
-    cur = conn.execute(
-        f"INSERT INTO arrivals (seq, {names}) VALUES ({_NEXT_SEQ}, {marks})", tuple(cols.values())
-    )
-    return cur.lastrowid
-
-
 def update_arrival(conn: sqlite3.Connection, arrival_id: int, **cols) -> None:
     """Update one arrival row; it takes the next global change sequence."""
     sets = "".join(f", {name} = ?" for name in cols)
@@ -286,7 +276,11 @@ def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
             currency=invoice.currency,
             total=_text(invoice.total),
         )
-    arrival_id = insert_arrival(conn, **cols)
+    names = ", ".join(cols)
+    marks = ", ".join("?" * len(cols))
+    arrival_id = conn.execute(
+        f"INSERT INTO arrivals (seq, {names}) VALUES ({_NEXT_SEQ}, {marks})", tuple(cols.values())
+    ).lastrowid
     if decision.outcome is Outcome.APPROVED:
         claim(conn, arrival_id, new.arrived_at)
     return arrival_id

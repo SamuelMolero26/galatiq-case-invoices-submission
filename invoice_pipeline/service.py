@@ -239,7 +239,8 @@ def bootstrap(args) -> Runtime:
     inventory = Path(args.inventory or catalog.DEFAULT_INVENTORY_PATH)
     ledger_path = Path(args.ledger or ledger.DEFAULT_LEDGER_PATH)
     try:
-        catalog.seed_if_missing(inventory)
+        if not inventory.exists():
+            catalog.seed(inventory)
         loaded = catalog.load_catalog(inventory)
         ledger.connect(ledger_path).close()
     except (CatalogError, ledger.LedgerError, sqlite3.Error, OSError) as exc:
