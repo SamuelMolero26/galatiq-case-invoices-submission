@@ -1,8 +1,3 @@
-"""LLM Critic support: the pure Case File builder and the offline role bundle.
-
-Slice 1 supplies only the offline tier. Online roles extend this module in slice 2.
-"""
-
 from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.model import (
