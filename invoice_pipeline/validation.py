@@ -44,9 +44,10 @@ def _vendor(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     if key is None:
         return []  # a missing vendor is an identity Finding, never VENDOR_UNKNOWN
     known = catalog.vendors.get(key)
-    if known is not None and known.status == "blocked":
+    status = known[1] if known else None
+    if status == "blocked":
         return [finding(FindingCode.VENDOR_BLOCKED, f"vendor '{invoice.vendor}' is blocked")]
-    if known is not None and known.status == "trusted":
+    if status == "trusted":
         return []
     findings = [
         finding(FindingCode.VENDOR_UNKNOWN, f"vendor '{invoice.vendor}' is not on the list")
@@ -67,18 +68,18 @@ def _comparison_name(name: str) -> str:
 def vendor_lookalike(vendor: str | None, catalog: Catalog) -> Finding | None:
     """Review Trigger when a not-exactly-known vendor resembles a trusted or blocked one."""
     key = vendor_key(vendor)
-    if key is None or key in catalog.vendors and catalog.vendors[key].status != "unknown":
+    if key is None or key in catalog.vendors and catalog.vendors[key][1] != "unknown":
         return None
     name = _comparison_name(vendor)
     if not name:
         return None
     scored = sorted(
         (
-            -SequenceMatcher(None, name, _comparison_name(known.display_name)).ratio(),
-            known.display_name,
+            -SequenceMatcher(None, name, _comparison_name(display_name)).ratio(),
+            display_name,
         )
-        for known in catalog.vendors.values()
-        if known.status in ("trusted", "blocked") and _comparison_name(known.display_name)
+        for display_name, status in catalog.vendors.values()
+        if status in ("trusted", "blocked") and _comparison_name(display_name)
     )
     if not scored or -scored[0][0] < VENDOR_LOOKALIKE_THRESHOLD:
         return None

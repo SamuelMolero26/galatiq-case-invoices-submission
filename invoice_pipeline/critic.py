@@ -1,8 +1,3 @@
-"""LLM Critic support: the pure Case File builder and the offline role bundle.
-
-Slice 1 supplies only the offline tier. Online roles extend this module in slice 2.
-"""
-
 from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.model import (
@@ -61,8 +56,6 @@ def offline_role(role: str) -> RoleCall:
 def offline_agents() -> Agents:
     """The permanent `Agents` bundle for the offline tier; every path fails closed, no I/O."""
     return Agents(
-        assess=lambda *args, **kwargs: None,  # no usable answer
-        verify=lambda *args, **kwargs: None,  # no usable answer
         escalate_review=lambda case_file: offline_role("escalate_review"),
         advise=lambda case_file, decision: offline_role("advisory"),
     )

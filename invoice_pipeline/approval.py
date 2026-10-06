@@ -47,11 +47,8 @@ def _decision(outcome, reasons, row, decided_by="rule_engine", **extra) -> Decis
     )
 
 
-_RANK = {Severity.REJECTION_RULE: 0, Severity.REVIEW_TRIGGER: 1, Severity.WARNING: 2}
-
-
 def _reasons(findings: list[Finding]) -> list[str]:
-    ordered = sorted(findings, key=lambda f: _RANK[f.severity])
+    ordered = sorted(findings, key=lambda f: list(Severity).index(f.severity))
     return [f"{_where(f)}: {f.detail}" for f in ordered]
 
 
@@ -84,51 +81,40 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
     elif _of(case_file, Severity.REVIEW_TRIGGER):  # row 3: human-only
         decision = _decision(Outcome.NEEDS_REVIEW, _reasons(case_file.findings), 3)
     elif warnings := _of(case_file, Severity.WARNING):  # rows 4-5
-        return _decide_warnings(case_file, agents, warnings)
-    else:  # row 6
-        return _decide_clean(case_file, agents)
+        names = ", ".join(_where(f) for f in warnings)
+        usd = case_file.references.usd_equivalent
+        amount = usd.amount if usd is not None else case_file.invoice.total
+        if amount is not None and amount > HEIGHTENED_SCRUTINY_USD:
+            currency = "USD" if usd is not None else case_file.invoice.currency
+            decision = _decision(
+                Outcome.NEEDS_REVIEW,
+                [
+                    f"HEIGHTENED_SCRUTINY: {amount:.2f} {currency} is above the "
+                    f"${HEIGHTENED_SCRUTINY_USD:,.0f} Critic approval limit ({names})"
+                ],
+                4,
+            )
+        elif failures := check_bounds(case_file):
+            decision = _decision(Outcome.NEEDS_REVIEW, failures, 5, bound_failures=failures)
+        else:
+            # Slice 1 has no online roles: within-bound Warnings never get a usable Critic answer.
+            return _decision(
+                Outcome.NEEDS_REVIEW,
+                [f"UNREVIEWED_WARNINGS: no usable Critic answer for {names}"],
+                5,
+                unreviewed_warnings=True,
+            )
+    else:  # row 6: Approved unless the escalate-only review escalates; never adds an approval
+        call = agents.escalate_review(case_file)
+        answer = call.answer or {}
+        if call.tier == "offline" or answer.get("verdict") == "concur":
+            return _decision(Outcome.APPROVED, ["no findings"], 6, escalate_review=call)
+        if answer.get("verdict") == "escalate":
+            reason = f"ESCALATE_ONLY_REVIEW: {answer.get('rationale', 'escalated')}"
+            return _decision(
+                Outcome.NEEDS_REVIEW, [reason], 6, decided_by="llm_critic", escalate_review=call
+            )
+        reason = f"ESCALATE_ONLY_REVIEW_FAILED: {call.error or 'no usable answer'}"
+        return _decision(Outcome.NEEDS_REVIEW, [reason], 6, escalate_review=call)
     decision.advisory = agents.advise(case_file, decision)  # explains; never read back
     return decision
-
-
-def _decide_warnings(case_file: CaseFile, agents: Agents, warnings: list[Finding]) -> Decision:
-    names = ", ".join(_where(f) for f in warnings)
-    usd = case_file.references.usd_equivalent
-    amount = usd.amount if usd is not None else case_file.invoice.total
-    if amount is not None and amount > HEIGHTENED_SCRUTINY_USD:
-        currency = "USD" if usd is not None else case_file.invoice.currency
-        decision = _decision(
-            Outcome.NEEDS_REVIEW,
-            [
-                f"HEIGHTENED_SCRUTINY: {amount:.2f} {currency} is above the "
-                f"${HEIGHTENED_SCRUTINY_USD:,.0f} Critic approval limit ({names})"
-            ],
-            4,
-        )
-    elif failures := check_bounds(case_file):
-        decision = _decision(Outcome.NEEDS_REVIEW, failures, 5, bound_failures=failures)
-    else:
-        # Slice 1 has no online roles: within-bound Warnings never get a usable Critic answer.
-        return _decision(
-            Outcome.NEEDS_REVIEW,
-            [f"UNREVIEWED_WARNINGS: no usable Critic answer for {names}"],
-            5,
-            unreviewed_warnings=True,
-        )
-    decision.advisory = agents.advise(case_file, decision)
-    return decision
-
-
-def _decide_clean(case_file: CaseFile, agents: Agents) -> Decision:
-    """Row 6: Approved unless the escalate-only review escalates; it can never add an approval."""
-    call = agents.escalate_review(case_file)
-    answer = call.answer or {}
-    if call.tier == "offline" or answer.get("verdict") == "concur":
-        return _decision(Outcome.APPROVED, ["no findings"], 6, escalate_review=call)
-    if answer.get("verdict") == "escalate":
-        reason = f"ESCALATE_ONLY_REVIEW: {answer.get('rationale', 'escalated')}"
-        return _decision(
-            Outcome.NEEDS_REVIEW, [reason], 6, decided_by="llm_critic", escalate_review=call
-        )
-    reason = f"ESCALATE_ONLY_REVIEW_FAILED: {call.error or 'no usable answer'}"
-    return _decision(Outcome.NEEDS_REVIEW, [reason], 6, escalate_review=call)
