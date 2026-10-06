@@ -4,6 +4,7 @@ Orchestration only: every rule lives in ingestion, validation, approval, ledger 
 """
 
 import json
+import logging
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
@@ -22,6 +23,8 @@ from invoice_pipeline.validation import validate
 
 MAX_DECIDE_ATTEMPTS = 3  # read-decide-write rounds before a processing failure
 
+log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class Runtime:
@@ -35,11 +38,19 @@ class Runtime:
 
 
 class ProcessingFailure(Exception):
-    """A file failed after ingestion: nothing was recorded for it."""
+    """An invoice of a file failed after ingestion, at the named stage."""
 
     def __init__(self, file: str, stage: str, error: str):
         super().__init__(f"{file}: {stage}: {error}")
         self.file, self.stage, self.error = file, stage, error
+
+
+def _notify(rt: Runtime, event: Event) -> None:
+    """Deliver an event; an observer error is logged and never changes what was processed."""
+    try:
+        rt.on_event(event)
+    except Exception:
+        log.warning("event observer failed on %s for %s", event.name, event.file, exc_info=True)
 
 
 @contextmanager
@@ -62,7 +73,7 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
     invoice = ingested.invoice
     with _stage(source, "validation"):
         findings = [*ingested.findings, *validate(invoice, rt.catalog)]
-    rt.on_event(Event("validated", source, {"findings": [f.code.value for f in findings]}))
+    _notify(rt, Event("validated", source, {"findings": [f.code.value for f in findings]}))
     identity, key = invoice.identity(), vendor_key(invoice.vendor)
     for attempt in range(1, MAX_DECIDE_ATTEMPTS + 1):
         with _stage(source, "ledger"):
@@ -85,7 +96,7 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
         if arrival_id is not None:
             return arrival_id
         if attempt < MAX_DECIDE_ATTEMPTS:
-            rt.on_event(Event("redecided", source, {"attempt": attempt}))
+            _notify(rt, Event("redecided", source, {"attempt": attempt}))
     raise ProcessingFailure(
         source,
         "ledger",
@@ -137,9 +148,9 @@ def pay_claimed(conn, arrival_id: int, rt: Runtime, source: str) -> None:
     with _stage(source, "payment"):
         issue = payment.pay(conn, arrival_id, rt.pay_fn, rt.now)
     if issue is None:
-        rt.on_event(Event("payment_sent", source, {"arrival_id": arrival_id}))
+        _notify(rt, Event("payment_sent", source, {"arrival_id": arrival_id}))
     else:
-        rt.on_event(Event("payment_failed", source, {"issue": issue.model_dump(mode="json")}))
+        _notify(rt, Event("payment_failed", source, {"issue": issue.model_dump(mode="json")}))
 
 
 class ResolutionRefused(Exception):
@@ -258,19 +269,25 @@ def collect_files(path: Path | str) -> list[Path]:
     return sorted(p for p in path.iterdir() if p.is_file()) if path.is_dir() else [path]
 
 
-def process_path(path: Path | str, rt: Runtime) -> list[ArrivalResult]:
+def process_path(path: Path | str, rt: Runtime) -> BatchResult:
     """Ingest one file, then decide, record and (when Approved) pay each invoice in it
-    independently; a failure records nothing for that invoice and stops the rest of the file."""
+    independently; a failing invoice is reported and the rest of the file continues."""
     path = Path(path)
+    results, failed = [], []
     conn = ledger.connect(rt.ledger_path)
     try:
-        return [_process_one(conn, ingested, path.name, rt) for ingested in ingestion.ingest(path)]
+        for ingested in ingestion.ingest(path):
+            try:
+                results.append(_process_one(conn, ingested, path.name, rt))
+            except Exception as exc:
+                failed.append(_failure(rt, path, exc))
     finally:
         conn.close()
+    return BatchResult(results, failed)
 
 
 def _process_one(conn, ingested: Ingested, source: str, rt: Runtime) -> ArrivalResult:
-    rt.on_event(Event("ingested", source, {"unreadable": ingested.invoice is None}))
+    _notify(rt, Event("ingested", source, {"unreadable": ingested.invoice is None}))
     if ingested.invoice is None:
         with _stage(source, "approval"):
             decision = decide_unreadable(ingested.findings)
@@ -280,8 +297,8 @@ def _process_one(conn, ingested: Ingested, source: str, rt: Runtime) -> ArrivalR
     else:
         arrival_id = record_arrival(conn, ingested, source, rt)
     result = arrival_result(conn, arrival_id)
-    rt.on_event(
-        Event("decided", source, {"outcome": result.decision, "row": result.precedence_row})
+    _notify(
+        rt, Event("decided", source, {"outcome": result.decision, "row": result.precedence_row})
     )
     if result.state == "payment_pending":  # Approved and claimed
         pay_claimed(conn, arrival_id, rt, source)
@@ -298,24 +315,33 @@ class BatchResult:
         return dict(Counter(r.state for r in self.results))
 
 
+def _failure(rt: Runtime, path: Path, exc: Exception) -> ProcessingFailure:
+    """Report an exception as a ProcessingFailure (emitting `file_failed`) and return it."""
+    failure = (
+        exc
+        if isinstance(exc, ProcessingFailure)
+        else ProcessingFailure(Path(path).name, "processing", f"{type(exc).__name__}: {exc}")
+    )
+    _notify(
+        rt, Event("file_failed", failure.file, {"stage": failure.stage, "error": failure.error})
+    )
+    return failure
+
+
 def run_batch(paths: list[Path], rt: Runtime) -> BatchResult:
-    """Process files in the given order; a processing failure is reported and the rest continue."""
+    """Process files in the given order; a processing failure is reported and the rest continue.
+
+    Every committed invoice is in `results`, also when another invoice of its file failed.
+    """
     results, failed = [], []
     for path in paths:
         try:
-            results.extend(process_path(path, rt))
-        except Exception as exc:
-            failure = (
-                exc
-                if isinstance(exc, ProcessingFailure)
-                else ProcessingFailure(
-                    Path(path).name, "processing", f"{type(exc).__name__}: {exc}"
-                )
-            )
-            failed.append(failure)
-            rt.on_event(
-                Event("file_failed", failure.file, {"stage": failure.stage, "error": failure.error})
-            )
+            batch = process_path(path, rt)
+        except Exception as exc:  # the file itself could not be processed (e.g. the Ledger)
+            failed.append(_failure(rt, path, exc))
+            continue
+        results.extend(batch.results)
+        failed.extend(batch.failed)
     return BatchResult(results, failed)
 
 

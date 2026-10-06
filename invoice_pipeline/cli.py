@@ -136,7 +136,7 @@ def _run_batch(args, ui) -> int:
     for failure in batch.failed:
         _error(str(failure))
     if batch.failed:
-        _error(f"{len(batch.failed)} file(s) failed and were not recorded; rerunning is safe")
+        _error(f"{len(batch.failed)} processing failure(s); see the errors above")
         return EXIT_FAILED
     return EXIT_OK
 
