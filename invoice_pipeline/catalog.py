@@ -10,16 +10,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import NamedTuple
 
 from invoice_pipeline.model import vendor_key
 
 DEFAULT_INVENTORY_PATH = Path("inventory.db")
+SCHEMA_VERSION = 1
 TABLES = ("inventory", "vendors", "pricing")
 
-STOCK_LEVELS = {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5, "FakeItem": 0}
-PRICES = {"WidgetA": "250", "WidgetB": "500", "GadgetX": "750"}
-TRUSTED_VENDORS = (
+_SEED_STOCK_LEVELS = {"WidgetA": 15, "WidgetB": 10, "GadgetX": 5, "FakeItem": 0}
+_SEED_PRICES = {"WidgetA": "250", "WidgetB": "500", "GadgetX": "750"}
+_SEED_TRUSTED_VENDORS = (
     "Widgets Inc.",
     "Gadgets Co.",
     "Precision Parts Ltd.",
@@ -33,27 +33,25 @@ TRUSTED_VENDORS = (
     "TechParts International",
     "Reliable Components Inc.",
 )
-BLOCKED_VENDORS = ("Fraudster LLC",)
+_SEED_BLOCKED_VENDORS = ("Fraudster LLC",)
 
 
-class KnownVendor(NamedTuple):
-    display_name: str
-    status: str  # "trusted" | "blocked"
+class CatalogError(Exception):
+    """The inventory database does not have the expected schema."""
 
 
 @dataclass(frozen=True)
 class Catalog:
     stock: Mapping[str, Decimal]  # canonical sku -> Stock Level
     prices: Mapping[str, Decimal]  # canonical sku -> USD reference unit price
-    vendors: Mapping[str, KnownVendor]  # vendor_key -> known vendor
+    vendors: Mapping[str, tuple[str, str]]  # vendor_key -> (display name, "trusted" | "blocked")
 
     def resolve_sku(self, sku: str | None) -> str | None:
         """Canonical catalog SKU for a (case-insensitive) SKU, or None when unknown."""
         if not sku:
             return None
-        return next(
-            (s for s in (*self.stock, *self.prices) if s.casefold() == sku.casefold()), None
-        )
+        folded = {s.casefold(): s for s in (*self.stock, *self.prices)}
+        return folded.get(sku.casefold())
 
 
 def seed(path: Path, reset: bool = False) -> None:
@@ -72,25 +70,37 @@ def seed(path: Path, reset: bool = False) -> None:
             CREATE TABLE IF NOT EXISTS pricing (sku TEXT PRIMARY KEY, unit_price TEXT NOT NULL);
             """
         )
-        conn.executemany("INSERT OR IGNORE INTO inventory VALUES (?, ?)", STOCK_LEVELS.items())
-        conn.executemany("INSERT OR IGNORE INTO pricing VALUES (?, ?)", PRICES.items())
-        vendors = [(n, "trusted") for n in TRUSTED_VENDORS] + [
-            (n, "blocked") for n in BLOCKED_VENDORS
+        conn.executemany(
+            "INSERT OR IGNORE INTO inventory VALUES (?, ?)", _SEED_STOCK_LEVELS.items()
+        )
+        conn.executemany("INSERT OR IGNORE INTO pricing VALUES (?, ?)", _SEED_PRICES.items())
+        vendors = [(n, "trusted") for n in _SEED_TRUSTED_VENDORS] + [
+            (n, "blocked") for n in _SEED_BLOCKED_VENDORS
         ]
         conn.executemany(
             "INSERT OR IGNORE INTO vendors VALUES (?, ?, ?)",
             [(vendor_key(n), n, status) for n, status in vendors],
         )
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.close()
 
 
 def load_catalog(path: Path) -> Catalog:
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
+        existing = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in TABLES:
+            if table not in existing:
+                raise CatalogError(f"{path}: inventory database is missing table '{table}'")
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version != SCHEMA_VERSION:
+            raise CatalogError(
+                f"{path}: unexpected user_version {version} (expected {SCHEMA_VERSION})"
+            )
         stock = {sku: Decimal(level) for sku, level in conn.execute("SELECT * FROM inventory")}
         prices = {sku: Decimal(price) for sku, price in conn.execute("SELECT * FROM pricing")}
         vendors = {
-            key: KnownVendor(name, status)
+            key: (name, status)
             for key, name, status in conn.execute(
                 "SELECT name_key, display_name, status FROM vendors"
             )

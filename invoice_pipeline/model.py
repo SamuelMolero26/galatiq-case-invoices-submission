@@ -1,5 +1,3 @@
-"""Typed contract shared by every stage. Severity is defined once, in `SEVERITY`."""
-
 import datetime as dt
 import re
 from collections.abc import Callable
@@ -8,7 +6,6 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
-
 from pydantic import BaseModel, BeforeValidator
 
 
