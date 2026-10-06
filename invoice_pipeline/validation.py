@@ -244,16 +244,16 @@ def price_deviations(invoice: Invoice, catalog: Catalog) -> dict[int, Decimal]:
 
 
 def _prices(invoice: Invoice, catalog: Catalog) -> list[Finding]:
-    signed = _signed_deviations(invoice, catalog)
     return [
         finding(
             FindingCode.PRICE_DEVIATION,
             f"unit price {_m(invoice.items[index].unit_price)} "
-            f"vs reference {_m(signed[index][1])}: "
-            f"{signed[index][0] * 100:+.2f}%, tolerance {PRICE_TOLERANCE * 100:.0f}%",
+            f"vs reference {_m(reference)}: "
+            f"{deviation * 100:+.2f}%, tolerance {PRICE_TOLERANCE * 100:.0f}%",
             line=index,
         )
-        for index in price_deviations(invoice, catalog)
+        for index, (deviation, reference) in _signed_deviations(invoice, catalog).items()
+        if abs(deviation) > PRICE_TOLERANCE
     ]
 
 
