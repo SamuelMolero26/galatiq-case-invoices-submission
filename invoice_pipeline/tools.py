@@ -58,18 +58,19 @@ def open_readonly(path: Path | str) -> sqlite3.Connection:
 class ToolRunner:
     """Runs tool calls for one invoice: one shared budget, every call recorded in order.
 
-    `inventory` and `ledger` are read-only connections (`open_readonly`). `run` raises
+    `inventory` and `ledger_conn` are read-only connections (`open_readonly`). `run` raises
     `ToolError` for a failed call after recording it; earlier calls stay recorded.
     """
 
     def __init__(
         self,
         inventory: sqlite3.Connection,
-        ledger: sqlite3.Connection,
+        ledger_conn: sqlite3.Connection,
         invoice: Invoice,
         budget: int = MAX_TOOL_CALLS,
     ):
-        self.inventory, self.ledger, self.invoice, self.budget = inventory, ledger, invoice, budget
+        self.inventory, self.ledger_conn = inventory, ledger_conn
+        self.invoice, self.budget = invoice, budget
         self.calls: list[ToolCall] = []
 
     def run(self, attempt: int, name: str, arguments: str) -> dict[str, Any]:
@@ -115,7 +116,7 @@ class ToolRunner:
                 "stock_level": row and str(row[0]),
             }
         if name == "get_vendor_history":
-            entries, total = ledger.vendor_history(self.ledger, args["vendor_key"])
+            entries, total = ledger.vendor_history(self.ledger_conn, args["vendor_key"])
             return {
                 "vendor_key": args["vendor_key"],
                 "entries": [e.model_dump(mode="json") for e in entries],

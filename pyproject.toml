@@ -13,7 +13,7 @@ dependencies = [
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
-    "slow: needs a live LLM provider (Ollama or Grok); skipped without configuration",
+    "slow: needs a live Grok endpoint (XAI_API_KEY, GROK_BASE_URL); skipped without configuration",
 ]
 
 [tool.ruff]

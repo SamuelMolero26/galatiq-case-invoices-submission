@@ -16,6 +16,7 @@ GROK_TIMEOUT_S = 30  # a remote API answers quickly or not at all
 XAI_MODEL_DEFAULT = "grok-4.7"
 FORMAT_TRIES = 3  # Correction Wrapper tries per answer
 MAX_TOKENS = 1024
+MAX_TOOL_ROUNDS = 8  # tool-call rounds per try; bounds any `run_tool`, not just ToolRunner's
 
 
 class ConfigError(Exception):
@@ -94,7 +95,7 @@ def chat(tier: TierConfig, messages: list[dict], tools: list[dict] | None = None
     else:
         body["response_format"] = {"type": "json_object"}
     headers = {"Content-Type": "application/json"}
-    if tier.tier == "grok" and tier.api_key:
+    if tier.api_key:
         headers["Authorization"] = f"Bearer {tier.api_key}"
     request = urllib.request.Request(
         f"{tier.base_url.rstrip('/')}/chat/completions",
@@ -112,7 +113,15 @@ def chat(tier: TierConfig, messages: list[dict], tools: list[dict] | None = None
         ]
     except urllib.error.HTTPError as exc:
         raise LLMError(f"HTTP {exc.code}: {exc.read()[:200].decode(errors='replace')}") from exc
-    except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError, TypeError) as exc:
+    except (
+        OSError,
+        http.client.HTTPException,
+        ValueError,
+        KeyError,
+        IndexError,
+        TypeError,
+        AttributeError,  # `message` or a tool call is not an object
+    ) as exc:
         reason = getattr(exc, "reason", exc)
         if isinstance(reason, TimeoutError):
             raise LLMError(f"timeout after {tier.timeout_s}s") from exc
@@ -161,7 +170,7 @@ def ask[T](
     tools: list[dict] | None = None,
     run_tool: Callable[[str, str], dict] | None = None,
     tries: int = FORMAT_TRIES,
-    corrective_role: str = "tool",
+    corrective_role: str = "user",
     chat_fn: Callable[..., ChatReply] = chat,
 ) -> Asked[T]:
     """The Correction Wrapper: validate each answer and, on a format error, reply with the exact
@@ -199,7 +208,7 @@ def ask[T](
 
 def _converse(tier, conversation, tools, run_tool, current: Try, chat_fn) -> ChatReply:
     """Request until the model answers without tool calls; each request is recorded."""
-    while True:
+    for _ in range(MAX_TOOL_ROUNDS + 1):  # the final request must answer without tools
         called_at, started = dt.datetime.now(dt.UTC), time.monotonic()
         try:
             reply = chat_fn(tier, conversation, tools)
@@ -212,14 +221,18 @@ def _converse(tier, conversation, tools, run_tool, current: Try, chat_fn) -> Cha
             return reply
         if run_tool is None:
             raise _Stop("tool failure: tool calls requested but this role has no tools")
+        if any(not call.id for call in reply.tool_calls):
+            raise _Stop("tool failure: tool call without an id cannot be answered")
         conversation.append(reply.message)
         for call in reply.tool_calls:
             try:
                 result = run_tool(call.name, call.arguments)
             except Exception as exc:
                 raise _Stop(f"tool failure: {exc}") from exc
-            message = {"role": "tool", "content": json.dumps(result)}
-            conversation.append({**message, "tool_call_id": call.id} if call.id else message)
+            conversation.append(
+                {"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)}
+            )
+    raise _Stop(f"tool failure: still calling tools after {MAX_TOOL_ROUNDS} rounds")
 
 
 def _exchange(raw: str | None, error: str | None, called_at, started: float) -> LLMExchange:
