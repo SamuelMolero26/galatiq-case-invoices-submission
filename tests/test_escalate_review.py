@@ -153,3 +153,22 @@ def test_service_level_zero_pay_calls_after_escalate(tmp_path, grok):
     assert result.decision == Outcome.NEEDS_REVIEW and result.state == "needs_review"
     assert result.reasons[0].startswith("ESCALATE_ONLY_REVIEW:")
     assert paid == []
+
+
+def test_reviewer_is_not_shown_bookkeeping_defaults(grok, make_case):
+    chat = ScriptedChat(concur())
+
+    decide(make_case(), online_agents(grok, chat_fn=chat))
+
+    sent = json.dumps(chat.requests[0]["messages"][1])
+    for hidden in ("claimed_state", "paid_to_date", "payment_terms", "due_date_text"):
+        assert hidden not in sent
+
+
+def test_bookkeeping_field_is_not_citable_evidence(grok, make_case):
+    chat = ScriptedChat(concur(evidence=["arrival.claimed_state"]), concur())
+
+    decision = decide(make_case(), online_agents(grok, chat_fn=chat))
+
+    assert decision.outcome is Outcome.APPROVED
+    assert len(decision.escalate_review.tries) == 2

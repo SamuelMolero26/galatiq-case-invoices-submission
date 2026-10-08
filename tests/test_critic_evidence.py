@@ -55,6 +55,13 @@ def test_whole_records_nulls_and_unknown_paths_are_not_evidence():
         assert not _is_case_file_path(CASE, path), path
 
 
+def test_dict_records_are_not_evidence_but_their_leaves_are():
+    view = {"references": {"price_deviations": {}, "reference_prices": {"WidgetA": 250}}}
+    assert not _is_case_file_path(view, "references.price_deviations")
+    assert not _is_case_file_path(view, "references.reference_prices")
+    assert _is_case_file_path(view, "references.reference_prices.WidgetA")
+
+
 def _price_case() -> CaseFile:
     invoice = Invoice(
         invoice_number="INV-1",
