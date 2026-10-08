@@ -1,5 +1,10 @@
 """Small shared fixtures for the selected Slice 2C closure tests."""
 
+import builtins
+import contextlib
+import io
+import os
+import socket
 from decimal import Decimal
 
 import pytest
@@ -111,3 +116,77 @@ def grok():
     from invoice_pipeline.llm import TierConfig
 
     return TierConfig(tier="grok", model="test-model", base_url="http://llm.invalid", timeout_s=1)
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Fail every outbound connection attempt; returns the recorded `(kind, target)` attempts."""
+    attempts: list[tuple[str, object]] = []
+
+    def blocked(kind):
+        def refuse(*args, **kwargs):
+            attempts.append((kind, args[1] if kind == "connect" and len(args) > 1 else args[:1]))
+            raise RuntimeError(f"network access blocked in tests: {kind}")
+
+        return refuse
+
+    monkeypatch.setattr(socket.socket, "connect", blocked("connect"))
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked("connect_ex"))
+    monkeypatch.setattr(socket, "create_connection", blocked("create_connection"))
+    monkeypatch.setattr(socket, "getaddrinfo", blocked("getaddrinfo"))
+    return attempts
+
+
+@pytest.fixture
+def no_fs_access():
+    """A context-manager factory: inside `with`, file opens and eval/exec are refused and recorded.
+
+    Scoped to the `with` so pytest's own file handling is never affected.
+    """
+
+    @contextlib.contextmanager
+    def guard():
+        attempts: list[tuple[str, object]] = []
+
+        def blocked(kind):
+            def refuse(*args, **kwargs):
+                attempts.append((kind, args[:1]))
+                raise PermissionError(f"filesystem/eval access blocked in tests: {kind}")
+
+            return refuse
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(builtins, "open", blocked("open"))
+            patch.setattr(io, "open", blocked("io.open"))
+            patch.setattr(os, "open", blocked("os.open"))
+            patch.setattr(builtins, "eval", blocked("eval"))
+            patch.setattr(builtins, "exec", blocked("exec"))
+            yield attempts
+
+    return guard
+
+
+@pytest.fixture
+def make_case(catalog):
+    """Case File with explicit findings/arrival, for exercising a chosen precedence row."""
+    from invoice_pipeline.model import FindingCode, finding
+
+    def make(codes=(), kind="new", quantity="1", unit_price="250", vendor="Acme Corp", lines=(0,)):
+        inv = invoice([line("WidgetA", unit_price, quantity)], vendor=vendor)
+        findings = [finding(FindingCode(code), "scripted", ln) for code in codes for ln in lines]
+        arrival = (
+            ArrivalSummary(kind="duplicate", duplicate_of=1, paid_to_date=inv.total)
+            if kind == "duplicate"
+            else ArrivalSummary(kind="new")
+        )
+        return build_case_file(inv, findings, arrival, None, catalog, [], 0, online=True)
+
+    return make
+
+
+def concur(evidence=("invoice.vendor",), verdict="concur", rationale="nothing needs a human"):
+    import json
+
+    return text_reply(
+        json.dumps({"verdict": verdict, "evidence": list(evidence), "rationale": rationale})
+    )

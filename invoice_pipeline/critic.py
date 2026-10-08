@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from invoice_pipeline import extraction
 from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD, check_assessments
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.llm import CorrectableError, FinalError, TierConfig, ask, chat, role_call
@@ -253,6 +254,9 @@ def online_agents(tier: TierConfig, tool_factory=None, chat_fn=chat) -> Agents:
         verify=verify_role,
         escalate_review=escalate_review,
         advise=advise,
+        extract=lambda raw_text, fields: extraction.extract(
+            tier, raw_text, fields, chat_fn=chat_fn
+        ),
     )
 
 
