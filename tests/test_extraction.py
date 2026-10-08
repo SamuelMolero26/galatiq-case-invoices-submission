@@ -58,7 +58,7 @@ def test_requested_never_asks_for_items():
 
 # --- parse_extraction(): strict and grounded -------------------------------------------
 
-RAW = "Acme Corp invoice 2002\nGrand sum 1,000.00\n"
+RAW = "Acme Corp invoice INV 2002\nGrand sum 1,000.00\n"
 
 
 def parse(content, fields=("total",), raw=RAW):
@@ -100,11 +100,34 @@ def test_parser_rejects_unknown_or_nonrequested_key(content):
         ('{"total": "1000.001"}', ("total",)),
         ('{"total": "999999.00"}', ("total",)),  # ungrounded amount
         ('{"vendor": "Globex"}', ("vendor",)),  # ungrounded text
-        ('{"invoice_number": "9999"}', ("invoice_number",)),
+        ('{"invoice_number": "INV 9999"}', ("invoice_number",)),  # ungrounded number
     ],
 )
 def test_parser_rejects_number_type_empty_multiline_ungrounded(content, fields):
     assert isinstance(parse(content, fields), CorrectableError)
+
+
+def test_parser_accepts_inv_invoice_number_with_dash_or_space():
+    raw = "ref INV-2002 and INV 2003\n"
+
+    assert parse('{"invoice_number": "INV-2002"}', ("invoice_number",), raw) == {
+        "invoice_number": "INV-2002"
+    }
+    assert parse('{"invoice_number": "INV 2003"}', ("invoice_number",), raw) == {
+        "invoice_number": "INV 2003"
+    }
+
+
+@pytest.mark.parametrize(
+    "number",
+    ["2002", "2", "INV2002", "INV-202", "INV-20021", "inv 2002", "INV_2002", "Corp"],
+)
+def test_parser_rejects_invoice_number_not_shaped_inv_four_digits(number):
+    raw = "Acme Corp INV 2002 INV2002 INV-202 INV-20021 inv 2002 INV_2002\n"
+
+    assert isinstance(
+        parse(json.dumps({"invoice_number": number}), ("invoice_number",), raw), CorrectableError
+    )
 
 
 # --- extract(): correction wrapper, never raises ---------------------------------------
@@ -201,7 +224,7 @@ def test_merge_ignores_fields_that_were_not_requested(grok):
 
 def test_merge_normalizes_invoice_number(grok):
     call, merged = supplied(
-        load("missing_identity"), grok, vendor=None, invoice_number="2002", total=None
+        load("missing_identity"), grok, vendor=None, invoice_number="INV 2002", total=None
     )
 
     assert merged.invoice.invoice_number == "INV-2002"
@@ -219,7 +242,7 @@ def test_llm_extracted_iff_supplied(grok):
 
 def test_llm_extracted_findings_name_each_supplied_field(grok):
     _, merged = supplied(
-        load("missing_identity"), grok, vendor="Acme Corp", invoice_number="2002", total="1000"
+        load("missing_identity"), grok, vendor="Acme Corp", invoice_number="INV 2002", total="1000"
     )
 
     assert [f.code for f in merged.findings] == [FindingCode.LLM_EXTRACTED] * 3
