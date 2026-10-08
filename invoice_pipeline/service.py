@@ -85,7 +85,14 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
         all_findings = [*findings, *ctx.findings]
         with _stage(source, "approval"):
             case_file = build_case_file(
-                invoice, all_findings, ctx.arrival, None, rt.catalog, history, total
+                invoice,
+                all_findings,
+                ctx.arrival,
+                None,
+                rt.catalog,
+                history,
+                total,
+                online=rt.tier != "offline",
             )
             decision = decide(case_file, rt.agents)
         new = ledger.Arrival(

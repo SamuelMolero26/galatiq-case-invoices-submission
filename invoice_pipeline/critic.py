@@ -12,12 +12,15 @@ from invoice_pipeline.model import (
     CaseFile,
     Decision,
     Finding,
+    FindingCode,
     HistoryEntry,
     Invoice,
     References,
     RoleCall,
+    Severity,
     UsdEquivalent,
 )
+from invoice_pipeline.prompts import WARNING_CHECKLIST
 from invoice_pipeline.validation import PRICE_TOLERANCE, aggregate_quantities, price_deviations
 
 OFFLINE_TIER = "offline tier"
@@ -31,6 +34,8 @@ def build_case_file(
     catalog: Catalog,
     history: list[HistoryEntry],
     history_total: int,
+    *,
+    online: bool = False,
 ) -> CaseFile:
     """Assemble everything a model role may read. Pure: no I/O, no model arithmetic."""
     skus = {s for item in invoice.items if (s := catalog.resolve_sku(item.sku)) is not None}
@@ -43,14 +48,30 @@ def build_case_file(
         usd_equivalent=usd,
         heightened_scrutiny_line=HEIGHTENED_SCRUTINY_USD,
     )
+    warnings = [f for f in findings if f.severity is Severity.WARNING]
     return CaseFile(
         invoice=invoice,
         findings=findings,
         arrival=arrival,
+        decision_context=_decision_context(arrival, findings) if online else [],
+        checklist=_checklist(warnings) if online else {},
         references=references,
         vendor_history=history,
         vendor_history_total=history_total,
     )
+
+
+def _checklist(warnings: list[Finding]) -> dict[FindingCode, tuple[str, ...]]:
+    return {f.code: WARNING_CHECKLIST[f.code] for f in warnings if f.code in WARNING_CHECKLIST}
+
+
+def _decision_context(arrival: ArrivalSummary, findings: list[Finding]) -> list[str]:
+    """Pre-decision facts for advisory reasoning only; assessors never receive them."""
+
+    def where(f: Finding) -> str:
+        return f.code.value + (f" line {f.line}" if f.line is not None else "")
+
+    return [f"arrival: {arrival.kind}"] + [f"{f.severity.value}: {where(f)}" for f in findings]
 
 
 def offline_role(role: str) -> RoleCall:
@@ -116,9 +137,7 @@ def _validate_escalate(case_file: CaseFile):
             or not evidence
             or not all(isinstance(item, str) for item in evidence)
         ):
-            return CorrectableError(
-                "field 'evidence' must be a non-empty list of Case File paths"
-            )
+            return CorrectableError("field 'evidence' must be a non-empty list of Case File paths")
         for path in evidence:
             if not _is_case_file_path(case_file, path):
                 return CorrectableError(
@@ -150,8 +169,8 @@ def _escalate_messages(case_file: CaseFile) -> list[dict]:
         {
             "role": "system",
             "content": "You are the escalate-only reviewer of a clean invoice. Reply ONLY "
-            "with JSON: {\"verdict\": \"concur\"|\"escalate\", \"evidence\": "
-            "[\"<dotted Case File path>\", ...], \"rationale\": \"...\"}. Concur only when "
+            'with JSON: {"verdict": "concur"|"escalate", "evidence": '
+            '["<dotted Case File path>", ...], "rationale": "..."}. Concur only when '
             "nothing in the Case File needs a human; you never approve payment.",
         },
         {"role": "user", "content": case_file.model_dump_json()},
@@ -163,7 +182,7 @@ def _advisory_messages(case_file: CaseFile, decision: Decision) -> list[dict]:
         {
             "role": "system",
             "content": "You explain an already-made decision for the audit trail. Reply ONLY "
-            "with JSON: {\"rationale\": \"...\"}. You are advisory only: you never authorize "
+            'with JSON: {"rationale": "..."}. You are advisory only: you never authorize '
             "payment and your verdict, if any, is not read back.",
         },
         {
