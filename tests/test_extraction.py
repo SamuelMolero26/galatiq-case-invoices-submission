@@ -5,13 +5,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from conftest import ScriptedChat, text_reply
+from conftest import Harness, ScriptedChat, text_reply
 
-from invoice_pipeline import extraction
+from invoice_pipeline import extraction, ledger, service
 from invoice_pipeline.critic import offline_agents, online_agents
 from invoice_pipeline.ingestion.text import parse_text
 from invoice_pipeline.llm import CorrectableError, LLMError
-from invoice_pipeline.model import Agents, FindingCode, Ingested, RoleCall
+from invoice_pipeline.model import Agents, FindingCode, Ingested, Outcome, RoleCall
 from invoice_pipeline.validation import validate
 
 FIXTURES = Path(__file__).parent / "fixtures" / "extraction"
@@ -301,3 +301,173 @@ def test_online_agents_extract_built_offline_none(grok):
 
     assert call.role == "extraction" and call.answer == {"total": "1000.00"}
     assert offline_agents().extract is None
+
+
+# --- service level: gating, never paid, grounded only (EXT-6) --------------------------
+
+ADVICE = text_reply(json.dumps({"rationale": "explained for the reviewer"}))
+
+
+def txt(vendor="Precision Parts Ltd.", number="INV-2001", total=None, note=""):
+    """A messy TXT invoice; a None field is left out of the document."""
+    lines = [f"Vendor: {vendor}" if vendor else None, f"Invoice: {number}" if number else None]
+    lines += ["Date: 2026-01-05", "", "WidgetA  qty: 4  unit price: $250.00", "", note]
+    lines += [f"Total: {total}" if total else "Please remit 1,000.00 within 30 days."]
+    return "\n".join(line for line in lines if line is not None) + "\n"
+
+
+def paid_invoice(harness, number="INV-2001", vendor="Precision Parts Ltd."):
+    """Seed a Paid arrival (a real invoice through an offline pipeline) for the same identity."""
+    offline = service.Runtime(
+        catalog=harness.rt.catalog,
+        ledger_path=harness.ledger_path,
+        pay_fn=lambda *args: {"status": "success"},
+    )
+    path = harness.write(
+        "seed.json",
+        {
+            "invoice_number": number,
+            "vendor": {"name": vendor},
+            "date": "2026-01-02",
+            "line_items": [{"item": "WidgetA", "quantity": 4, "unit_price": 250.00}],
+            "subtotal": 1000.00,
+            "total": 1000.00,
+            "currency": "USD",
+        },
+    )
+    result = service.process_path(path, offline).results[0]
+    assert result.state == "paid"
+    return result.arrival_id
+
+
+def reply(**fields):
+    return text_reply(json.dumps(fields))
+
+
+def stored(harness, arrival_id):
+    conn = ledger.connect(harness.ledger_path)
+    try:
+        row = conn.execute("SELECT * FROM arrivals WHERE id = ?", (arrival_id,)).fetchone()
+    finally:
+        conn.close()
+    return row, json.loads(row["record"])
+
+
+def test_txt_online_needs_review_never_paid(tmp_path, grok):
+    h = Harness(tmp_path, grok, reply(total="1000.00"), ADVICE)
+
+    result = h.process("invoice.txt", txt())
+
+    assert result.decision == Outcome.NEEDS_REVIEW and result.state == "needs_review"
+    assert result.precedence_row == 3 and "LLM_EXTRACTED" in result.finding_codes
+    assert "LLM_EXTRACTED: invoice.total supplied by the Extraction Fallback" in result.reasons
+    assert h.paid == []
+    row, record = stored(h, result.arrival_id)
+    assert record["invoice"]["total"] == "1000.00"
+    assert record["invoice"]["extracted_fields"] == ["total"]
+
+
+def test_extraction_failure_keeps_deterministic_findings_unpaid(tmp_path, grok):
+    h = Harness(tmp_path, grok, LLMError("HTTP 500"), ADVICE)
+
+    result = h.process("invoice.txt", txt())
+
+    assert result.decision != Outcome.APPROVED and h.paid == []
+    assert "LLM_EXTRACTED" not in result.finding_codes
+    assert "MISSING_REQUIRED_FIELD" in result.finding_codes
+
+
+def test_injection_text_only_grounded_requested_fields(tmp_path, grok):
+    text = (FIXTURES / "injection.txt").read_text()
+    h = Harness(tmp_path, grok, reply(total="999999"), reply(total="500.00"), ADVICE)
+
+    result = h.process("invoice.txt", text)
+
+    assert result.decision != Outcome.APPROVED and h.paid == []
+    _, record = stored(h, result.arrival_id)
+    assert record["invoice"]["total"] == "500.00"
+    assert record["invoice"]["extracted_fields"] == ["total"]
+    assert record["invoice"]["vendor"] == "Acme Corp"  # never requested, never touched
+    assert len(h.chat.requests) == 3  # one correction, then the advisory
+
+
+# --- decision #1018: extracted identity never yields a silent Duplicate ----------------
+
+
+def test_extracted_invoice_number_colliding_with_paid_arrival_is_needs_review_in_queue(
+    tmp_path, grok
+):
+    h = Harness(tmp_path, grok, reply(invoice_number="INV-2001"))
+    paid_id = paid_invoice(h)
+
+    result = h.process("invoice.txt", txt(number=None, total="1,000.00", note="Re INV-2001"))
+
+    assert result.decision == Outcome.NEEDS_REVIEW and result.state == "needs_review"
+    assert result.precedence_row == 1
+    assert result.reasons[0].startswith("POSSIBLE_DUPLICATE_PAYMENT:")
+    assert f"arrival #{paid_id}" in result.reasons[0]
+    assert "Extraction Fallback" in result.reasons[0]
+    assert "LLM_EXTRACTED: invoice.invoice_number supplied by the Extraction Fallback" in (
+        result.reasons
+    )
+    assert h.paid == [] and len(h.chat.requests) == 1  # no advisory: row 1 calls no model
+    assert result.model_notes == "extraction"
+    row, record = stored(h, result.arrival_id)
+    assert row["duplicate_of"] == paid_id and record["decision"]["duplicate_of"] == paid_id
+    assert record["extraction"]["role"] == "extraction"
+    assert record["extraction"]["answer"] == {"invoice_number": "INV-2001"}
+    assert result.arrival_id in [q.arrival_id for q in service.review_queue(h.ledger_path)]
+
+
+def test_extracted_vendor_collision_needs_review(tmp_path, grok):
+    h = Harness(tmp_path, grok, reply(vendor="Precision Parts Ltd."))
+    paid_id = paid_invoice(h)
+
+    result = h.process(
+        "invoice.txt", txt(vendor=None, total="1,000.00", note="Precision Parts Ltd.")
+    )
+
+    assert result.decision == Outcome.NEEDS_REVIEW and result.state == "needs_review"
+    assert result.reasons[0].startswith("POSSIBLE_DUPLICATE_PAYMENT:")
+    assert f"arrival #{paid_id}" in result.reasons[0] and h.paid == []
+
+
+def test_real_identity_collision_still_duplicate(tmp_path, grok):
+    h = Harness(tmp_path, grok)
+    paid_id = paid_invoice(h)
+
+    result = h.process("invoice.txt", txt(total="1,000.00"))
+
+    assert result.decision == Outcome.DUPLICATE and result.state == "duplicate"
+    assert result.reasons == [f"DUPLICATE_PAYMENT: already paid 1000.00 USD on arrival #{paid_id}"]
+    assert h.chat.requests == [] and h.paid == []
+
+
+def test_extracted_total_only_collision_unaffected_still_duplicate(tmp_path, grok):
+    h = Harness(tmp_path, grok, reply(total="1000.00"))
+    paid_id = paid_invoice(h)
+
+    result = h.process("invoice.txt", txt())
+
+    assert result.decision == Outcome.DUPLICATE and result.state == "duplicate"
+    assert f"arrival #{paid_id}" in result.reasons[0] and h.paid == []
+
+
+def test_extracted_collision_can_be_rejected_and_approval_fails_closed_without_amount(
+    tmp_path, grok
+):
+    h = Harness(tmp_path, grok, reply(invoice_number="INV-2001"))
+    paid_invoice(h)
+    first = h.process("a.txt", txt(number=None, total="1,000.00", note="Re INV-2001"))
+    h.chat.replies.append(reply(invoice_number="INV-2001"))
+    second = h.process("b.txt", txt(number=None, total="1,000.00", note="Re INV-2001"))
+
+    # Not refused as a Duplicate (it is a normal Needs Review), but a collision arrival carries
+    # no payable amount (`classify` sets none), so approval stays closed: reject is the path.
+    with pytest.raises(service.ResolutionRefused) as caught:
+        service.resolve(h.rt, first.arrival_id, "approve", "checked, it is a new invoice")
+    assert "no known positive payable amount" in str(caught.value)
+    assert "Duplicate" not in str(caught.value)
+    rejected = service.resolve(h.rt, second.arrival_id, "reject", "same invoice as the paid one")
+
+    assert rejected.state == "logged_rejection" and h.paid == []

@@ -78,6 +78,25 @@ def _duplicate(case_file: CaseFile) -> Decision:
     )
 
 
+def _possible_duplicate(case_file: CaseFile) -> Decision:
+    """Row 1 collision on an identity the Extraction Fallback supplied: a human decides.
+
+    A wrong-but-grounded extracted identity must not drop a legitimate invoice into Duplicate,
+    which the Review Queue never lists. Nothing is paid: Needs Review is human-only.
+    """
+    candidate = case_file.arrival.duplicate_of
+    note = (
+        f"POSSIBLE_DUPLICATE_PAYMENT: matches arrival #{candidate} "
+        "(identity supplied by Extraction Fallback)"
+    )
+    return _decision(
+        Outcome.NEEDS_REVIEW,
+        [note, *_reasons(case_file.findings)],
+        1,
+        duplicate_of=candidate,
+    )
+
+
 def decide_unreadable(findings: list[Finding]) -> Decision:
     """An Unreadable Document has no invoice: row 3, with no Validation and no model call."""
     return _decision(Outcome.NEEDS_REVIEW, _reasons(findings), 3)
@@ -86,6 +105,8 @@ def decide_unreadable(findings: list[Finding]) -> Decision:
 def decide(case_file: CaseFile, agents: Agents) -> Decision:
     """Normative precedence, first matching row wins. Only this function builds a Decision."""
     if case_file.arrival.kind == "duplicate":  # row 1: no model call of any kind
+        if {"vendor", "invoice_number"} & set(case_file.invoice.extracted_fields):
+            return _possible_duplicate(case_file)
         return _duplicate(case_file)
     if _of(case_file, Severity.REJECTION_RULE):  # row 2
         decision = _decision(Outcome.REJECTED, _reasons(case_file.findings), 2)
@@ -110,6 +131,7 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
         else:  # the full gate: its Decision is final and carries no advisory
             return orchestrate(case_file, agents)
     else:  # row 6: Approved unless the escalate-only review escalates; never adds an approval
+        _step(agents, "escalate", 1)
         call = agents.escalate_review(case_file)
         answer = call.answer or {}
         if call.tier == "offline" or answer.get("verdict") == "concur":
@@ -121,6 +143,7 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
             )
         reason = f"ESCALATE_ONLY_REVIEW_FAILED: {call.error or 'no usable answer'}"
         return _decision(Outcome.NEEDS_REVIEW, [reason], 6, escalate_review=call)
+    _step(agents, "advise", 1)
     decision.advisory = agents.advise(case_file, decision)  # explains; never read back
     return decision
 
