@@ -73,19 +73,18 @@ def vendor_lookalike(vendor: str | None, catalog: Catalog) -> Finding | None:
     name = _comparison_name(vendor)
     if not name:
         return None
-    scored = sorted(
+    best = min(
         (
-            -SequenceMatcher(None, name, _comparison_name(display_name)).ratio(),
-            display_name,
-        )
-        for display_name, status in catalog.vendors.values()
-        if status in ("trusted", "blocked") and _comparison_name(display_name)
+            (-SequenceMatcher(None, name, _comparison_name(display_name)).ratio(), display_name)
+            for display_name, status in catalog.vendors.values()
+            if status in ("trusted", "blocked") and _comparison_name(display_name)
+        ),
+        default=None,
     )
-    if not scored or -scored[0][0] < VENDOR_LOOKALIKE_THRESHOLD:
+    if best is None or -best[0] < VENDOR_LOOKALIKE_THRESHOLD:
         return None
     return finding(
-        FindingCode.VENDOR_LOOKALIKE,
-        f"resembles known vendor '{scored[0][1]}' (score {-scored[0][0]:.2f})",
+        FindingCode.VENDOR_LOOKALIKE, f"resembles known vendor '{best[1]}' (score {-best[0]:.2f})"
     )
 
 

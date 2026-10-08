@@ -366,8 +366,8 @@ class Agents:
 
     Offline callables answer None (no usable answer). The full-gate roles are
     `assess(case_file, attempt, feedback, scratch) -> AssessCall | None` (`scratch` is a
-    per-invoice dict shared by both attempts; `scratch["cleanup"]` lists callables the
-    orchestrator runs afterwards) and
+    per-invoice dict shared by both attempts; the orchestrator closes `scratch["runner"]`
+    afterwards) and
     `verify(case_file, assessments, tool_calls, attempt) -> VerifyCall | None`.
     """
 

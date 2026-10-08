@@ -469,9 +469,9 @@ def orchestrate(case_file: CaseFile, agents: Agents) -> Decision:
                 break
             feedback = verdict.feedback
     finally:
-        for cleanup in scratch.get("cleanup", []):
+        if runner := scratch.get("runner"):
             with contextlib.suppress(Exception):
-                cleanup()
+                runner.close()
     critic = CriticRecord(attempts=attempts) if attempts else None
     if verdict.approved:
         reasons = [f"LLM_CRITIC: {names} explained by evidence and verified"]

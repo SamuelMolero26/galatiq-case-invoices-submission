@@ -5,7 +5,6 @@ import io
 import json
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
 from decimal import Decimal
 
 from invoice_pipeline.ingestion.normalize import (
@@ -66,7 +65,7 @@ def _build(data: dict, rows: list[dict], source_path: str, source_format: str) -
         invoice_number=normalize_invoice_number(_text(data.get("invoice_number"))),
         vendor=_text(data.get("vendor")),
         revision=_text(data.get("revision")),
-        invoice_date=parse_date(_us_date(_text(data.get("date"))), "invoice_date", repairs),
+        invoice_date=parse_date(_text(data.get("date")), "invoice_date", repairs),
         due_date_text=_text(data.get("due_date")),
         payment_terms=_text(data.get("payment_terms")),
         currency=(_text(data.get("currency")) or "USD").upper(),
@@ -81,16 +80,6 @@ def _build(data: dict, rows: list[dict], source_path: str, source_format: str) -
         source_format=source_format,
     )
     return Ingested(invoice=invoice, findings=[], repairs=repairs)
-
-
-def _us_date(text: str | None) -> str | None:
-    """MM/DD/YYYY (the CSV spelling) as ISO; any other text is left for parse_date."""
-    if text and re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", text):
-        try:
-            return datetime.strptime(text, "%m/%d/%Y").date().isoformat()
-        except ValueError:
-            return text
-    return text
 
 
 _ROW_COLUMNS = {

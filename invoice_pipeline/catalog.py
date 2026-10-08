@@ -10,7 +10,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import NamedTuple
 
 from invoice_pipeline.model import vendor_key
 
@@ -39,11 +38,6 @@ _SEED_BLOCKED_VENDORS = ("Fraudster LLC",)
 
 class CatalogError(Exception):
     """The inventory database does not have the expected schema."""
-
-
-class KnownVendor(NamedTuple):
-    display_name: str
-    status: str  # "trusted" | "blocked"
 
 
 @dataclass(frozen=True)

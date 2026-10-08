@@ -206,7 +206,7 @@ def online_agents(tier: TierConfig, tool_factory=None, chat_fn=chat) -> Agents:
 
     `tool_factory(case_file)` builds the invoice's `ToolRunner` (read-only connections); the
     Assessor gets tools only when it is supplied. The runner lives in the per-invoice `scratch`
-    so both attempts share one budget, and its cleanup is registered there for the orchestrator.
+    so both attempts share one budget; the orchestrator closes it afterwards.
     An unusable answer surfaces as an unaccepted record or None, and `decide` fails closed.
     """
 
@@ -230,8 +230,6 @@ def online_agents(tier: TierConfig, tool_factory=None, chat_fn=chat) -> Agents:
             except Exception as exc:
                 error = f"tool setup failure: {type(exc).__name__}: {exc}"
                 return _failed_call(AssessCall, attempt, tier, error)
-            if close := getattr(runner, "close", None):
-                scratch.setdefault("cleanup", []).append(close)
         return assess(
             tier, case_file, runner=runner, attempt=attempt, feedback=feedback, chat_fn=chat_fn
         )
