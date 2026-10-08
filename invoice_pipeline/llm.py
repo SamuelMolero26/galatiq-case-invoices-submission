@@ -170,7 +170,7 @@ def ask[T](
     tools: list[dict] | None = None,
     run_tool: Callable[[str, str], dict] | None = None,
     tries: int = FORMAT_TRIES,
-    corrective_role: str = "tool",
+    corrective_role: str = "user",
     chat_fn: Callable[..., ChatReply] = chat,
 ) -> Asked[T]:
     """The Correction Wrapper: validate each answer and, on a format error, reply with the exact
@@ -179,10 +179,6 @@ def ask[T](
 
     `run_tool(name, arguments_json)` answers the model's tool calls inside a try; raising
     stops the answer. Every try, request, and corrective message is recorded.
-
-    The first correction is sent as `corrective_role` (default `"tool"`). When the
-    provider refuses that tool corrective, the same correction is resent once as
-    `role=user` inside the same try; a second failure stops at once.
     """
     conversation = list(messages)
     done: list[Try] = []
@@ -192,17 +188,7 @@ def ask[T](
         try:
             reply = _converse(tier, conversation, tools, run_tool, current, chat_fn)
         except _Stop as stop:
-            if _tool_corrective_refused(conversation, done, current, stop):
-                conversation[-1] = {
-                    "role": "user",
-                    "content": conversation[-1]["content"],
-                }
-                try:
-                    reply = _converse(tier, conversation, tools, run_tool, current, chat_fn)
-                except _Stop as retry_stop:
-                    return Asked(None, str(retry_stop), done)
-            else:
-                return Asked(None, str(stop), done)
+            return Asked(None, str(stop), done)
         result = validate(reply.content or "")
         if isinstance(result, FinalError):
             return Asked(None, result.message, done)
@@ -218,30 +204,6 @@ def ask[T](
             {"role": corrective_role, "content": result.message},
         ]
     raise AssertionError("tries must be at least 1")
-
-
-def _tool_corrective_refused(
-    conversation: list[dict], done: list[Try], current: Try, stop: _Stop
-) -> bool:
-    """Whether `stop` refuses the tool corrective just sent (so one user resend is due).
-
-    True only when the conversation still ends with the previous try's tool
-    corrective, the failure is a transport/refusal on that try's first request,
-    and not a local `tool failure:`. Anything else stops at once.
-    """
-    if len(done) < 2 or len(current.exchanges) > 1:
-        return False
-    if str(stop).startswith("tool failure:"):
-        return False
-    previous = done[-2]
-    if previous.correction is None:
-        return False
-    last = conversation[-1] if conversation else None
-    return (
-        isinstance(last, dict)
-        and last.get("role") == "tool"
-        and last.get("content") == previous.correction
-    )
 
 
 def _converse(tier, conversation, tools, run_tool, current: Try, chat_fn) -> ChatReply:
