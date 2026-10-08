@@ -3,7 +3,8 @@
 import json
 import logging
 
-from conftest import Harness, text_reply, tool_reply
+import pytest
+from conftest import Harness, concur, text_reply, tool_reply
 
 from invoice_pipeline import ledger, service
 from invoice_pipeline.llm import LLMError, TierConfig
@@ -100,9 +101,8 @@ def test_record_has_all_role_audit_elements(tmp_path, grok):
     assert call["result"] and call["called_at"]
     assert assessor["assessments"][0]["code"] == "PRICE_DEVIATION" and assessor["failures"] == []
     assert verifier["accepted"] and verifier["checks"][0]["holds"] is True
-    assert (
-        record["decision"]["outcome"] == "approved" and record["decision"]["bound_failures"] == []
-    )
+    assert record["decision"]["outcome"] == "approved"
+    assert record["decision"]["bound_failures"] == []
     assert record["raw_text"] is None and record["extraction"] is None
 
 
@@ -207,3 +207,55 @@ def test_legacy_record_without_extraction_readable(tmp_path, grok):
         conn.close()
 
     assert legacy.model_notes == "advisory"
+
+
+# --- NOTES-1: one deterministic mapping ------------------------------------------------
+
+
+def role(tier="grok"):
+    return {"role": "x", "tier": tier}
+
+
+def record(extraction=False, **decision):
+    return {
+        "decision": decision,
+        "extraction": {"requested": ["total"], "supplied": [], "call": role()}
+        if extraction
+        else None,
+    }
+
+
+@pytest.mark.parametrize(
+    "rec,expected",
+    [
+        (record(critic={"attempts": []}), "critic"),  # a failed critic still names the role
+        (record(unreviewed_warnings=True), "offline tier"),  # offline row 5
+        (record(escalate_review=role("offline")), "offline tier"),  # offline row 6
+        (record(escalate_review=role()), "escalate_review"),
+        (record(advisory=role()), "advisory"),
+        (record(extraction=True), "extraction"),
+        (record(extraction=True, advisory=role()), "extraction, advisory"),
+        (record(), "none"),
+    ],
+)
+def test_model_notes_mapping(rec, expected):
+    assert service._model_notes(rec) == expected
+    assert service._model_notes(rec) == service._model_notes(rec)  # deterministic
+
+
+def test_extracted_collision_note():
+    collision = record(extraction=True, duplicate_of=7, outcome="needs_review")
+
+    assert service._model_notes(collision) == "extraction"
+
+
+def test_online_gate_run_reports_critic(tmp_path, grok):
+    h = Harness(tmp_path, grok, *GATE_REPLIES)
+
+    assert h.process("gate.json", GATE).model_notes == "critic"
+
+
+def test_online_row6_reports_escalate_review(tmp_path, grok):
+    h = Harness(tmp_path, grok, concur())
+
+    assert h.process("clean.json", CLEAN).model_notes == "escalate_review"

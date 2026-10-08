@@ -154,18 +154,29 @@ class ArrivalResult:
     model_notes: str  # "offline tier", a role name, or "none" (no model role ran)
 
 
+def _model_notes(record: dict) -> str:
+    """Which model roles touched the decision, derived only from the persisted record."""
+    decision = record["decision"]
+    notes = []
+    if record.get("extraction") is not None:
+        notes.append("extraction")
+    if decision.get("critic") is not None:
+        notes.append("critic")  # also when every attempt failed
+    elif decision.get("unreviewed_warnings"):
+        notes.append("offline tier")  # row 5 without a critic: no online role ever ran
+    else:
+        for role in ("escalate_review", "advisory"):
+            if call := decision.get(role):
+                notes.append("offline tier" if call["tier"] == "offline" else role)
+                break
+    return ", ".join(notes) or "none"
+
+
 def arrival_result(conn, arrival_id: int) -> ArrivalResult:
     row = conn.execute("SELECT * FROM arrivals WHERE id = ?", (arrival_id,)).fetchone()
     record = json.loads(row["record"])
     decision = record["decision"]
-    notes = "none"
-    if decision.get("critic") is not None:
-        notes = "critic"
-    else:
-        for role in ("escalate_review", "advisory"):
-            if call := decision.get(role):
-                notes = "offline tier" if call["tier"] == "offline" else role
-                break
+    notes = _model_notes(record)
     return ArrivalResult(
         arrival_id=arrival_id,
         source=row["source"],
