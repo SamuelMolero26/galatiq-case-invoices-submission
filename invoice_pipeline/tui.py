@@ -173,6 +173,8 @@ def _file_prompt(row: ResultRow, marked: bool) -> Table:
 class RunHeader(Static):
     """`invoice-flow · batch run · N files` and the ingest -> paid funnel."""
 
+    tier = "offline"  # set by the app once the runtime is known
+
     def show(self, results: Results) -> None:
         self.funnel(results.files, results.funnel)
 
@@ -182,6 +184,11 @@ class RunHeader(Static):
             ("invoice-flow", f"bold {TEXT}"), (f" · batch run · {files} files", MUTED)
         )
         right = Text()
+        if self.tier == "offline":
+            right.append("○ offline · rules only", DIM)
+        else:
+            right.append(f"● agents on · {self.tier}", GREEN)
+        right.append("   ")
         for i, stage in enumerate(FUNNEL):
             if i:
                 right.append(" → ", MUTED)
@@ -632,6 +639,8 @@ class InvoiceApp(App):
         except service.BootstrapError as exc:
             self.exit(return_code=1, message=f"cannot start: {exc}")
             return
+        if self.runtime is not None:
+            self.query_one(RunHeader).tier = self.runtime.tier
         self._show_view("all")
         self._set_mode(self.start)
 
