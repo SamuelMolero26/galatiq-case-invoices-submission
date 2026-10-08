@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator
+from pydantic import BaseModel, BeforeValidator, StrictBool
 
 
 class Severity(StrEnum):
@@ -230,6 +230,20 @@ class ToolCall(BaseModel):
     error: str | None  # unknown tool, bad arguments, raised, over budget
     called_at: dt.datetime
     elapsed_ms: int | None
+
+
+class WarningAssessment(BaseModel, frozen=True):
+    """One assessed Warning, in the strict shape settled by gate 2.5.
+
+    The Assessor returns one per `(code, line)`; the 2.11 evidence guardrail
+    reads exactly these fields. No coercion: `explained` is strict.
+    """
+
+    code: FindingCode
+    line: int | None
+    explained: StrictBool
+    evidence: list[str]
+    rationale: str
 
 
 class RoleCall(BaseModel):
