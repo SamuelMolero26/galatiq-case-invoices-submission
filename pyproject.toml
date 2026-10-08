@@ -11,6 +11,8 @@ dependencies = [
 
 [project.optional-dependencies]
 tui = ["textual==8.2.8"]  # `python main.py tui`; batch and `review --list` never need it
+dev = ["pytest>=8", "ruff>=0.8"]
+all = ["invoice-pipeline[tui,dev]"]  # full install: pip install -e ".[all]"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
