@@ -166,6 +166,8 @@ def arrival_result(conn, arrival_id: int) -> ArrivalResult:
             if call := decision.get(role):
                 notes = "offline tier" if call["tier"] == "offline" else role
                 break
+    if notes == "none" and record.get("extraction"):  # lowest precedence; full call in record
+        notes = "extraction"
     return ArrivalResult(
         arrival_id=arrival_id,
         source=row["source"],

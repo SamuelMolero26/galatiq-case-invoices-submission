@@ -300,6 +300,7 @@ def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
         "findings": new.findings,
         "repairs": new.ingested.repairs,
         "unreadable_reason": new.ingested.unreadable_reason,
+        "extraction": new.ingested.extraction,
         "decision": decision,
     }
     cols = dict(

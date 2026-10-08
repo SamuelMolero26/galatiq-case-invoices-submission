@@ -388,8 +388,11 @@ def test_extracted_invoice_number_colliding_with_paid_arrival_is_needs_review_in
         result.reasons
     )
     assert h.paid == [] and len(h.chat.requests) == 1  # no advisory: row 1 calls no model
+    assert result.model_notes == "extraction"
     row, record = stored(h, result.arrival_id)
     assert row["duplicate_of"] == paid_id and record["decision"]["duplicate_of"] == paid_id
+    assert record["extraction"]["role"] == "extraction"
+    assert record["extraction"]["answer"] == {"invoice_number": "INV-2001"}
     assert result.arrival_id in [q.arrival_id for q in service.review_queue(h.ledger_path)]
 
 
