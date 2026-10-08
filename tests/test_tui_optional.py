@@ -59,3 +59,15 @@ def test_importing_the_cli_does_not_import_textual():
     )
 
     assert out.stdout.strip() == "False"
+
+
+def test_tui_receives_the_runtime_flags(batch_ledger, monkeypatch):
+    seen = {}
+    fake = type(sys)("invoice_pipeline.tui")
+    fake.run = lambda ledger_path, args=None: seen.update(args=args) or 0
+    monkeypatch.setitem(sys.modules, "invoice_pipeline.tui", fake)
+    monkeypatch.setattr(invoice_pipeline, "tui", fake, raising=False)
+
+    code = cli.main(["--llm", "offline", "tui", "--ledger", str(batch_ledger)])
+
+    assert code == 0 and seen["args"].llm == "offline"
