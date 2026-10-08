@@ -57,3 +57,71 @@ Screen {
     height: 1;
     margin: 1 2;
 }
+
+#actions {
+    height: auto;
+    margin-top: 1;
+}
+
+#actions Button {
+    min-width: 0;
+    height: 3;
+    margin-right: 2;
+    padding: 0 1;
+    background: #141411;
+    border: solid #3A382F;
+    text-style: bold;
+}
+
+#actions #approve {
+    background: #8DBD79;
+    color: #141411;
+    border: solid #8DBD79;
+}
+
+#actions #reject {
+    color: #C38A76;
+    border: solid #C38A76;
+}
+
+#actions #retry {
+    color: #C6AC6E;
+    border: solid #C6AC6E;
+}
+
+#detail-status {
+    height: auto;
+    margin-top: 1;
+}
+
+#detail-chips {
+    height: auto;
+    margin-top: 1;
+}
+
+ReasonScreen {
+    align: center middle;
+    background: #141411 70%;
+}
+
+#reason-box {
+    width: 72;
+    height: auto;
+    padding: 1 2;
+    background: #1C1B17;
+    border: solid #3A382F;
+}
+
+#reason-input {
+    margin: 1 0 0 0;
+    background: #141411;
+    border: solid #69655B;
+}
+
+#reason-input:focus {
+    border: solid #C6AC6E;
+}
+
+#reason-error {
+    height: auto;
+}
