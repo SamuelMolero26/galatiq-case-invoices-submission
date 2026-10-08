@@ -21,6 +21,7 @@ from invoice_pipeline.catalog import Catalog, CatalogError
 from invoice_pipeline.critic import build_case_file, offline_agents, online_agents
 from invoice_pipeline.llm import ConfigError, select_tier
 from invoice_pipeline.model import Agents, Event, FindingCode, Ingested, QueueItem, vendor_key
+from invoice_pipeline.tools import ToolRunner, open_readonly
 from invoice_pipeline.validation import validate
 
 MAX_DECIDE_ATTEMPTS = 3  # read-decide-write rounds before a processing failure
@@ -85,7 +86,14 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
         all_findings = [*findings, *ctx.findings]
         with _stage(source, "approval"):
             case_file = build_case_file(
-                invoice, all_findings, ctx.arrival, None, rt.catalog, history, total
+                invoice,
+                all_findings,
+                ctx.arrival,
+                None,
+                rt.catalog,
+                history,
+                total,
+                online=rt.tier != "offline",
             )
             decision = decide(case_file, rt.agents)
         new = ledger.Arrival(
@@ -127,10 +135,13 @@ def arrival_result(conn, arrival_id: int) -> ArrivalResult:
     record = json.loads(row["record"])
     decision = record["decision"]
     notes = "none"
-    for role in ("escalate_review", "advisory"):
-        if call := decision.get(role):
-            notes = "offline tier" if call["tier"] == "offline" else role
-            break
+    if decision.get("critic") is not None:
+        notes = "critic"
+    else:
+        for role in ("escalate_review", "advisory"):
+            if call := decision.get(role):
+                notes = "offline tier" if call["tier"] == "offline" else role
+                break
     return ArrivalResult(
         arrival_id=arrival_id,
         source=row["source"],
@@ -248,6 +259,20 @@ def ledger_path_of(args) -> Path:
     return Path(args.ledger or ledger.DEFAULT_LEDGER_PATH)
 
 
+def tool_factory(inventory: Path, ledger_path: Path):
+    """Build the Assessor's per-invoice `ToolRunner` over fresh read-only connections."""
+
+    def make(case_file) -> ToolRunner:
+        stock = open_readonly(inventory)
+        try:
+            return ToolRunner(stock, open_readonly(ledger_path), case_file.invoice)
+        except Exception:
+            stock.close()
+            raise
+
+    return make
+
+
 def bootstrap(args) -> Runtime:
     """Seed a missing inventory, check both schemas, and select the tier via select_tier."""
     try:
@@ -263,7 +288,11 @@ def bootstrap(args) -> Runtime:
         ledger.connect(ledger_path).close()
     except (CatalogError, ledger.LedgerError, sqlite3.Error, OSError) as exc:
         raise BootstrapError(str(exc)) from exc
-    agents = online_agents(tier_cfg) if tier_cfg.tier == "grok" else offline_agents()
+    agents = (
+        online_agents(tier_cfg, tool_factory(inventory, ledger_path))
+        if tier_cfg.tier == "grok"
+        else offline_agents()
+    )
     return Runtime(catalog=loaded, ledger_path=ledger_path, tier=tier_cfg.tier, agents=agents)
 
 

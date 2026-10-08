@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, StrictBool
+from pydantic import AfterValidator, BaseModel, BeforeValidator, StrictBool
 
 
 class Severity(StrEnum):
@@ -88,6 +88,15 @@ def _no_float(value):
 Money = Annotated[Decimal, BeforeValidator(_no_float)]
 
 
+def _nonblank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must not be blank")
+    return value
+
+
+NonBlankString = Annotated[str, AfterValidator(_nonblank)]
+
+
 def vendor_key(name: str | None) -> str | None:
     """Comparison key: trimmed, case-folded, whitespace-collapsed. None when blank."""
     key = " ".join((name or "").split()).casefold()
@@ -151,6 +160,7 @@ class Ingested(BaseModel):
     unreadable_reason: str | None = None  # "<step>: <ErrorType>: <message>" when invoice is None
     raw_text: str | None = None  # TXT / PDF text layer; input of the Extraction Fallback
     missing_required: list[Literal["vendor", "invoice_number", "total", "items"]] = []
+    extraction: "RoleCall | None" = None  # noqa: UP037  Fallback audit; RoleCall is defined below
 
 
 class UsdEquivalent(BaseModel):
@@ -232,7 +242,7 @@ class ToolCall(BaseModel):
     elapsed_ms: int | None
 
 
-class WarningAssessment(BaseModel, frozen=True):
+class WarningAssessment(BaseModel, frozen=True, extra="forbid"):
     """One assessed Warning, in the strict shape settled by gate 2.5.
 
     The Assessor returns one per `(code, line)`; the 2.11 evidence guardrail
@@ -243,7 +253,77 @@ class WarningAssessment(BaseModel, frozen=True):
     line: int | None
     explained: StrictBool
     evidence: list[str]
-    rationale: str
+    rationale: NonBlankString
+
+
+class VerifyCheck(BaseModel, frozen=True, extra="forbid"):
+    """The Verifier's independent re-validation of one assessed Warning (strict, no coercion)."""
+
+    code: FindingCode
+    line: int | None
+    holds: StrictBool
+    rationale: NonBlankString
+
+
+class GuardrailCause(StrEnum):
+    """Why the evidence guardrail refused an assessment. `UNEXPLAINED` is the only final one."""
+
+    MISSING_ASSESSMENT = "missing_assessment"
+    WRONG_ASSESSMENT = "wrong_assessment"
+    UNEXPLAINED = "unexplained"
+    EMPTY_EVIDENCE = "empty_evidence"
+    MALFORMED_PATH = "malformed_path"
+    UNRESOLVED_EVIDENCE = "unresolved_evidence"
+    SELF_EVIDENCE = "self_evidence"
+    IRRELEVANT_EVIDENCE = "irrelevant_evidence"
+    CROSS_VENDOR_EVIDENCE = "cross_vendor_evidence"
+    CROSS_LINE_EVIDENCE = "cross_line_evidence"
+    WRONG_HISTORY_CURRENCY = "wrong_history_currency"
+
+
+class GuardrailFailure(BaseModel, frozen=True):
+    cause: GuardrailCause
+    where: str  # "PRICE_DEVIATION line 0"
+    message: str
+    correctable: bool  # False: finality, no correction can follow
+
+
+class AssessCall(BaseModel):
+    """One Assessor attempt: the Correction Wrapper tries, its tool calls, and the guardrail."""
+
+    attempt: int  # 1, or 2 for the correction round
+    model: str | None = None
+    tries: list[Try] = []
+    assessments: list[WarningAssessment] = []  # last parsed envelope, accepted or not
+    failures: list[GuardrailFailure] = []  # guardrail failures of the last parsed envelope
+    tool_calls: list[ToolCall] = []  # calls made during this attempt
+    accepted: bool = False  # parsed, guardrail-clean, every Warning explained
+    exhausted: bool = False  # every Correction Wrapper try failed validation
+    error: str | None = None  # "offline tier", transport, tool failure, exhaustion
+
+
+class VerifyCall(BaseModel):
+    """One Verifier pass over an accepted assessment."""
+
+    attempt: int
+    model: str | None = None
+    tries: list[Try] = []
+    checks: list[VerifyCheck] = []
+    accepted: bool = False  # one well-formed check per assessed Warning
+    error: str | None = None
+
+
+class CriticAttempt(BaseModel):
+    attempt: int
+    feedback: str | None = None  # Verifier feedback that opened this correction attempt
+    assessor: AssessCall
+    verifier: VerifyCall | None = None  # only an accepted assessment reaches the Verifier
+
+
+class CriticRecord(BaseModel):
+    """The full-gate audit of one decision: at most two attempts."""
+
+    attempts: list[CriticAttempt]
 
 
 class RoleCall(BaseModel):
@@ -255,6 +335,9 @@ class RoleCall(BaseModel):
     tries: list[Try]
     answer: dict[str, Any] | None  # parsed answer, or None (error says why)
     error: str | None = None
+
+
+Ingested.model_rebuild()
 
 
 class Outcome(StrEnum):
@@ -273,6 +356,7 @@ class Decision(BaseModel):
     escalate_review: RoleCall | None = None  # row 6
     advisory: RoleCall | None = None  # rows 2-5 without the full gate; never read by decide
     bound_failures: list[str] = []  # Critic Bound failures (row 5); no full gate when non-empty
+    critic: CriticRecord | None = None  # full-gate attempts (row 5 within bound); audit only
     unreviewed_warnings: bool = False
 
 
@@ -280,15 +364,19 @@ class Decision(BaseModel):
 class Agents:
     """Model roles injected into `approval.decide`; scripted fakes in tests.
 
-    Slice 1 supplies offline callables. Callable signatures are tightened when the
-    full-gate contracts arrive (assess/verify), without changing these fields.
+    Offline callables answer None (no usable answer). The full-gate roles are
+    `assess(case_file, attempt, feedback, scratch) -> AssessCall | None` (`scratch` is a
+    per-invoice dict shared by both attempts; the orchestrator closes `scratch["runner"]`
+    afterwards) and
+    `verify(case_file, assessments, tool_calls, attempt) -> VerifyCall | None`.
     """
 
-    assess: Callable[..., Any]
-    verify: Callable[..., Any]
+    assess: Callable[..., AssessCall | None]
+    verify: Callable[..., VerifyCall | None]
     escalate_review: Callable[[CaseFile], RoleCall]
     advise: Callable[[CaseFile, Decision], RoleCall]
     on_step: Callable[[str, dict], None] = field(default=lambda event, detail: None)
+    extract: Callable[[str, list[str]], RoleCall] | None = None  # online only
 
 
 class PaymentIssue(BaseModel):

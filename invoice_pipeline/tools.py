@@ -73,6 +73,10 @@ class ToolRunner:
         self.invoice, self.budget = invoice, budget
         self.calls: list[ToolCall] = []
 
+    def close(self) -> None:
+        self.inventory.close()
+        self.ledger_conn.close()
+
     def run(self, attempt: int, name: str, arguments: str) -> dict[str, Any]:
         called_at, started = dt.datetime.now(dt.UTC), time.monotonic()
         parsed: dict[str, Any] = {"raw": arguments}
