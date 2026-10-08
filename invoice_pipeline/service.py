@@ -21,6 +21,7 @@ from invoice_pipeline.catalog import Catalog, CatalogError
 from invoice_pipeline.critic import build_case_file, offline_agents, online_agents
 from invoice_pipeline.llm import ConfigError, select_tier
 from invoice_pipeline.model import Agents, Event, FindingCode, Ingested, QueueItem, vendor_key
+from invoice_pipeline.tools import ToolRunner, open_readonly
 from invoice_pipeline.validation import validate
 
 MAX_DECIDE_ATTEMPTS = 3  # read-decide-write rounds before a processing failure
@@ -255,6 +256,20 @@ def ledger_path_of(args) -> Path:
     return Path(args.ledger or ledger.DEFAULT_LEDGER_PATH)
 
 
+def tool_factory(inventory: Path, ledger_path: Path):
+    """Build the Assessor's per-invoice `ToolRunner` over fresh read-only connections."""
+
+    def make(case_file) -> ToolRunner:
+        stock = open_readonly(inventory)
+        try:
+            return ToolRunner(stock, open_readonly(ledger_path), case_file.invoice)
+        except Exception:
+            stock.close()
+            raise
+
+    return make
+
+
 def bootstrap(args) -> Runtime:
     """Seed a missing inventory, check both schemas, and select the tier via select_tier."""
     try:
@@ -270,7 +285,11 @@ def bootstrap(args) -> Runtime:
         ledger.connect(ledger_path).close()
     except (CatalogError, ledger.LedgerError, sqlite3.Error, OSError) as exc:
         raise BootstrapError(str(exc)) from exc
-    agents = online_agents(tier_cfg) if tier_cfg.tier == "grok" else offline_agents()
+    agents = (
+        online_agents(tier_cfg, tool_factory(inventory, ledger_path))
+        if tier_cfg.tier == "grok"
+        else offline_agents()
+    )
     return Runtime(catalog=loaded, ledger_path=ledger_path, tier=tier_cfg.tier, agents=agents)
 
 
