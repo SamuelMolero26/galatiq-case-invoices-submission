@@ -175,25 +175,12 @@ class ArrivalContext:
     findings: list[Finding] = field(default_factory=list)  # Findings the Ledger itself raises
 
 
-def _claimed_amount(row: ArrivalRow) -> Decimal | None:
-    return row.amount_paid if row.state == "paid" else row.amount_due
-
-
 def classify(rows: list[ArrivalRow], invoice: Invoice) -> ArrivalContext:
     """Route an arrival by its identity's history (pure). Claimed history = Paid or Pending."""
     claimed = [r for r in rows if r.state in ("paid", "payment_pending")]
     if invoice.identity() is None or not claimed:
         return ArrivalContext(ArrivalSummary(kind="new", amount_due=invoice.total))
     latest = max(claimed, key=lambda r: r.id)
-    if not invoice.revision:
-        return ArrivalContext(
-            ArrivalSummary(
-                kind="duplicate",
-                duplicate_of=latest.id,
-                paid_to_date=_claimed_amount(latest),
-                claimed_state=latest.state,
-            )
-        )
     cur = invoice.currency
     paid = sum(
         (r.amount_paid or 0 for r in claimed if r.state == "paid" and r.currency == cur), Decimal(0)
@@ -201,12 +188,28 @@ def classify(rows: list[ArrivalRow], invoice: Invoice) -> ArrivalContext:
     pending = sum(
         (r.amount_due or 0 for r in claimed if r.state != "paid" and r.currency == cur), Decimal(0)
     )
+    claimed_total = paid + pending
+    if not invoice.revision:
+        return ArrivalContext(
+            ArrivalSummary(
+                kind="duplicate",
+                duplicate_of=latest.id,
+                paid_to_date=claimed_total,
+                claimed_state=latest.state,
+            )
+        )
     detail = (
-        f"revision of an invoice already paid {paid:.2f} {cur} with {pending:.2f} {cur} pending; "
-        "no payable amount until Payment Delta handling exists"
+        f"revision of an invoice already paid {paid:.2f} {cur} with {pending:.2f} {cur} pending"
     )
+    remaining = None
+    if invoice.total is not None:
+        remaining = invoice.total - claimed_total
+        detail += f"; revised total {invoice.total:.2f} {cur}, remaining {remaining:.2f} {cur}"
+    detail += f"; explicit revision marker: {invoice.revision}"
+    detail += "; approving pays only the remaining amount"
+    payable = remaining if remaining is not None and remaining > 0 else None
     return ArrivalContext(
-        ArrivalSummary(kind="revision", paid_to_date=paid + pending),
+        ArrivalSummary(kind="revision", paid_to_date=claimed_total, amount_due=payable),
         [finding(FindingCode.REVISION_PAYMENT_DELTA, detail)],
     )
 

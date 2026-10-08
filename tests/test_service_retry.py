@@ -75,8 +75,8 @@ def _by_source(ledger_path) -> dict[str, int]:
         ("invoice_1002.txt", ("approve", "reject"), ("approve", "reject")),
         # Unreviewed Warnings (row 5, no usable Critic answer): retry only on an online tier
         ("invoice_1014.xml", ("approve", "reject"), ("approve", "reject", "retry")),
-        # Needs Review without a payable amount (revision): reject-only
-        ("invoice_1004_revised.json", ("reject",), ("reject",)),
+        # revision of a paid invoice: payable is the remaining delta, reviewer may approve
+        ("invoice_1004_revised.json", ("approve", "reject"), ("approve", "reject")),
         ("invoice_1001.txt", (), ()),  # paid
         ("invoice_1003.txt", (), ()),  # logged rejection
         ("invoice_1011.txt", (), ()),  # duplicate
