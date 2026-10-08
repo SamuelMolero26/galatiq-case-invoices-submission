@@ -405,6 +405,7 @@ class RunProgress:
         self.files = {name: FileProgress(name) for name in names}
         self.log: list[tuple[str, str, str]] = []  # (stage, message, colour), in arrival order
         self.funnel = dict.fromkeys(FUNNEL, 0)
+        self.ingestion: dict[str, list[dict]] = {}  # file -> one parse summary per ingested invoice
 
     @property
     def done(self) -> int:
@@ -424,6 +425,10 @@ class RunProgress:
             self.funnel[counted[name]] += 1
         if name == "decided" and detail.get("outcome") == "approved":
             self.funnel["approve"] += 1
+        if name == "ingested":
+            self.ingestion.setdefault(file, []).append(dict(detail))
+        elif name == "extract" and self.ingestion.get(file):
+            self.ingestion[file][-1]["extracted"] = list(detail.get("fields", ()))
         row = self.files.get(file)
         if row is None or row.stage not in STAGES:
             return
@@ -545,6 +550,38 @@ class AgentLog(VerticalScroll):
         self.scroll_end(animate=False)
 
 
+class IngestionPane(VerticalScroll):
+    """`ingestion`: what each file parsed into, one block per ingested invoice, as it arrives."""
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="ingestion-body")
+
+    @property
+    def body(self) -> Static:
+        return self.query_one("#ingestion-body", Static)
+
+    def show(self, progress: RunProgress) -> None:
+        table = Table.grid(expand=True)
+        table.add_column(ratio=1)  # detail lines wrap; only the file name is clipped
+        for file, parses in progress.ingestion.items():
+            for parse in parses:
+                table.add_row(Text(file, TEXT, no_wrap=True, overflow="ellipsis"))
+                if parse.get("unreadable"):
+                    table.add_row(Text(f"unreadable: {parse.get('reason')}", AMBER))
+                else:
+                    total = f"{parse.get('total') or '?'} {parse.get('currency', '')}".strip()
+                    parts = [parse.get("vendor") or "?", parse.get("invoice_number") or "?"]
+                    parts += [total, f"{parse.get('items', 0)} items"]
+                    table.add_row(Text(" · ".join(parts), SOFT))
+                if parse.get("findings"):
+                    table.add_row(Text(" ".join(parse["findings"]), AMBER))
+                if parse.get("extracted"):
+                    table.add_row(Text(f"extracted: {', '.join(parse['extracted'])}", MUTED))
+                table.add_row(Text())
+        self.body.update(table)
+        self.scroll_end(animate=False)
+
+
 def _progress_header(progress: RunProgress) -> Table:
     """`processing <source>` with the overall bar and percentage, and `done/total done`."""
     grid = Table.grid(expand=True)
@@ -635,6 +672,7 @@ class InvoiceApp(App):
                 with Horizontal(id="run-body"):
                     with VerticalScroll(id="run-files"):
                         yield RunFiles()
+                    yield IngestionPane(id="ingestion")
                     yield AgentLog(id="agent-log")
         yield Static(_key_hints(), id="keys")
 
@@ -643,6 +681,7 @@ class InvoiceApp(App):
         self.query_one(SourcePane).border_title = "new run · source"
         self.query_one(FoundPane).border_title = "found"
         self.query_one("#run-files").border_title = "files"
+        self.query_one(IngestionPane).border_title = "ingestion"
         self.query_one(AgentLog).border_title = "agent log"
         self.query_one(DetailPane).say(None)
         try:
@@ -770,6 +809,7 @@ class InvoiceApp(App):
         progress = self.progress
         self.query_one("#progress", Static).update(_progress_header(progress))
         self.query_one(RunFiles).show(progress)
+        self.query_one(IngestionPane).show(progress)
         self.query_one(AgentLog).show(progress)
         if self.mode == "processing":
             self.query_one(RunHeader).funnel(len(progress.files), progress.funnel, AMBER)

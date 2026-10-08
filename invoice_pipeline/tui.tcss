@@ -223,6 +223,7 @@ ReasonScreen {
 }
 
 #run-files,
+#ingestion,
 #agent-log {
     width: 1fr;
     height: 1fr;
@@ -235,6 +236,7 @@ ReasonScreen {
     scrollbar-background: #141411;
 }
 
+#ingestion,
 #agent-log {
     margin-left: 2;
 }
