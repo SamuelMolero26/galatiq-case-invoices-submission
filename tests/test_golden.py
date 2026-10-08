@@ -144,7 +144,9 @@ def test_a_duplicate_carrying_a_rejection_rule_is_still_a_duplicate(run, tmp_pat
     data["line_items"][0]["item"] = "WidgetC"  # unknown item: a Rejection Rule on any new arrival
     copy = tmp_path / "invoice_1004_copy.json"
     copy.write_text(json.dumps(data))
-    result = service.process_path(copy, run.rt)
+    batch = service.process_path(copy, run.rt)
+    assert batch.failed == []
+    (result,) = batch.results
     assert (result.state, result.precedence_row) == ("duplicate", 1)
     assert F.ITEM_UNKNOWN.value in result.finding_codes  # recorded, but it does not outrank
     assert len(run.calls) == 6
@@ -162,7 +164,7 @@ def test_final_state_per_identity_and_counts_match_the_table(run):
             paid_by_identity[key] = Decimal(row["amount_paid"])
     expected = {(r.vendor.casefold(), r.number): r.paid for r in ROWS_1A if r.paid is not None}
     assert paid_by_identity == expected
-    queue = service.review_queue(run.rt)
+    queue = service.review_queue(run.rt.ledger_path)
     assert [i.source for i in queue] == [
         "invoice_1002.txt",
         "invoice_1005.json",
@@ -219,9 +221,9 @@ def test_the_network_guard_was_live_for_the_whole_run(run):
 
 
 def test_pre_rate_eur_goes_to_review_with_no_rate_finding(run):
-    result = service.process_path(
-        CORPUS / "invoice_1014.xml", run.rt
-    )  # row 18: asserted in slice 3
+    batch = service.process_path(CORPUS / "invoice_1014.xml", run.rt)  # row 18: slice 3
+    assert batch.failed == []
+    (result,) = batch.results
     assert result.state == "needs_review"
     assert {F.CURRENCY_NON_USD.value, F.CURRENCY_NO_RATE.value} <= set(result.finding_codes)
     assert len(run.calls) == 6  # no payment attempted for the unsupported currency
