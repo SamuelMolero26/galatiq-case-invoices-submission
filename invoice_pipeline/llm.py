@@ -1,9 +1,9 @@
 import datetime as dt
 import http.client
 import json
+import threading
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -97,22 +97,16 @@ def chat(tier: TierConfig, messages: list[dict], tools: list[dict] | None = None
     headers = {"Content-Type": "application/json"}
     if tier.api_key:
         headers["Authorization"] = f"Bearer {tier.api_key}"
-    request = urllib.request.Request(
-        f"{tier.base_url.rstrip('/')}/chat/completions",
-        json.dumps(body).encode(),
-        headers,
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=tier.timeout_s) as response:
-            payload = json.load(response)
+        status, raw = _post(tier, json.dumps(body).encode(), headers)
+        if status != 200:
+            raise LLMError(f"HTTP {status}: {raw[:200].decode(errors='replace')}")
+        payload = json.loads(raw)
         message = payload["choices"][0]["message"]
         calls = [
             ToolRequest(call.get("id"), call["function"]["name"], _arguments(call["function"]))
             for call in message.get("tool_calls") or []
         ]
-    except urllib.error.HTTPError as exc:
-        raise LLMError(f"HTTP {exc.code}: {exc.read()[:200].decode(errors='replace')}") from exc
     except (
         OSError,
         http.client.HTTPException,
@@ -122,11 +116,46 @@ def chat(tier: TierConfig, messages: list[dict], tools: list[dict] | None = None
         TypeError,
         AttributeError,  # `message` or a tool call is not an object
     ) as exc:
-        reason = getattr(exc, "reason", exc)
-        if isinstance(reason, TimeoutError):
+        if isinstance(exc, TimeoutError):
             raise LLMError(f"timeout after {tier.timeout_s}s") from exc
         raise LLMError(f"{type(exc).__name__}: {exc}") from exc
     return ChatReply(message.get("content"), calls, message, payload.get("usage"))
+
+
+_conns = threading.local()  # one keep-alive connection per thread and endpoint
+
+
+def _post(tier: TierConfig, body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
+    """POST `body` to the chat endpoint over this thread's connection, opening it when needed.
+
+    A reused connection the server already closed fails before any reply: reconnect once. A
+    timeout is never retried.
+    """
+    url = urllib.parse.urlsplit(f"{tier.base_url.rstrip('/')}/chat/completions")
+    open_conn = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+    pool = _conns.__dict__.setdefault("pool", {})
+    key = (url.scheme, url.netloc, tier.timeout_s)
+    for attempt in (1, 2):
+        conn = pool.get(key)
+        reused = conn is not None
+        if conn is None:
+            conn = pool[key] = open_conn(url.netloc, timeout=tier.timeout_s)
+        try:
+            conn.request("POST", url.path + (f"?{url.query}" if url.query else ""), body, headers)
+            response = conn.getresponse()
+            raw = response.read()
+        except Exception as exc:
+            conn.close()
+            pool.pop(key, None)
+            stale = isinstance(exc, ConnectionError | http.client.BadStatusLine)
+            if reused and attempt == 1 and stale:
+                continue
+            raise
+        if response.will_close:
+            conn.close()
+            pool.pop(key, None)
+        return response.status, raw
+    raise AssertionError("unreachable")
 
 
 def _arguments(function: dict) -> str:
