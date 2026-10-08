@@ -10,12 +10,12 @@ import sqlite3
 from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from invoice_pipeline import catalog, ingestion, ledger, payment
+from invoice_pipeline import catalog, extraction, ingestion, ledger, payment
 from invoice_pipeline.approval import decide, decide_unreadable
 from invoice_pipeline.catalog import Catalog, CatalogError
 from invoice_pipeline.critic import build_case_file, offline_agents, online_agents
@@ -54,6 +54,30 @@ def _notify(rt: Runtime, event: Event) -> None:
         rt.on_event(event)
     except Exception:
         log.warning("event observer failed on %s for %s", event.name, event.file, exc_info=True)
+
+
+def _bind_events(rt: Runtime, source: str) -> Runtime:
+    """Route the model roles' step events to this runtime's observer, tagged with the file.
+
+    Bound per file, not at bootstrap: the CLI swaps `on_event` after bootstrap.
+    """
+    previous = rt.agents.on_step
+
+    def on_step(name: str, detail: dict) -> None:
+        _notify(rt, Event(name, source, dict(detail)))
+        previous(name, detail)
+
+    return replace(rt, agents=replace(rt.agents, on_step=on_step))
+
+
+def _maybe_extract(ingested: Ingested, source: str, rt: Runtime) -> Ingested:
+    """Run the Extraction Fallback once for an online readable TXT/PDF invoice with gaps."""
+    fields = extraction.requested(ingested)
+    if rt.tier == "offline" or rt.agents.extract is None or not fields:
+        return ingested
+    _notify(rt, Event("extract", source, {"fields": fields}))
+    with _stage(source, "extraction"):
+        return extraction.merge(ingested, rt.agents.extract(ingested.raw_text, fields))
 
 
 @contextmanager
@@ -320,6 +344,7 @@ def process_path(path: Path | str, rt: Runtime) -> BatchResult:
 
 
 def _process_one(conn, ingested: Ingested, source: str, rt: Runtime) -> ArrivalResult:
+    rt = _bind_events(rt, source)
     _notify(rt, Event("ingested", source, {"unreadable": ingested.invoice is None}))
     if ingested.invoice is None:
         with _stage(source, "approval"):
@@ -328,6 +353,7 @@ def _process_one(conn, ingested: Ingested, source: str, rt: Runtime) -> ArrivalR
         with _stage(source, "ledger"):
             arrival_id = ledger.record(conn, new)
     else:
+        ingested = _maybe_extract(ingested, source, rt)
         arrival_id = record_arrival(conn, ingested, source, rt)
     result = arrival_result(conn, arrival_id)
     _notify(

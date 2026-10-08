@@ -110,6 +110,7 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
         else:  # the full gate: its Decision is final and carries no advisory
             return orchestrate(case_file, agents)
     else:  # row 6: Approved unless the escalate-only review escalates; never adds an approval
+        _step(agents, "escalate", 1)
         call = agents.escalate_review(case_file)
         answer = call.answer or {}
         if call.tier == "offline" or answer.get("verdict") == "concur":
@@ -121,6 +122,7 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
             )
         reason = f"ESCALATE_ONLY_REVIEW_FAILED: {call.error or 'no usable answer'}"
         return _decision(Outcome.NEEDS_REVIEW, [reason], 6, escalate_review=call)
+    _step(agents, "advise", 1)
     decision.advisory = agents.advise(case_file, decision)  # explains; never read back
     return decision
 
