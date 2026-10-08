@@ -477,12 +477,15 @@ def _bar(fraction: float, width: int, colour: str, rest: str = RULE) -> Text:
     return Text.assemble(("█" * filled, colour), ("░" * (width - filled), rest))
 
 
-def _file_mark(row: FileProgress) -> tuple[str, str, str]:
-    """(glyph, colour, stage label) for a file of the run."""
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _file_mark(row: FileProgress, frame: int = 0) -> tuple[str, str, str]:
+    """(glyph, colour, stage label) for a file of the run; `frame` spins the in-flight glyph."""
     if row.stage == "queued":
         return "·", MUTED, "queued"
     if row.stage != "done":
-        return "⠿", TEXT, row.stage
+        return SPINNER[frame % len(SPINNER)], TEXT, row.stage
     if row.failed:
         return "✗", RED, "failed"
     state = next((s for s in FILE_STATE_ORDER if s in row.states), None)
@@ -495,14 +498,24 @@ def _file_mark(row: FileProgress) -> tuple[str, str, str]:
 class RunFiles(Static):
     """The run's files: glyph, name, mini bar and the stage each is in."""
 
+    frame = 0
+    _progress: RunProgress | None = None
+
+    def spin(self) -> None:
+        """Advance the in-flight glyph one frame (driven by the app's timer)."""
+        self.frame += 1
+        if self._progress is not None:
+            self.show(self._progress)
+
     def show(self, progress: RunProgress) -> None:
+        self._progress = progress
         table = Table.grid(expand=True, padding=(0, 1))
         table.add_column(width=1)
         table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
         table.add_column(width=BAR)
         table.add_column(width=15, no_wrap=True)
         for row in progress.files.values():
-            glyph, colour, label = _file_mark(row)
+            glyph, colour, label = _file_mark(row, self.frame)
             queued = row.stage == "queued"
             done = row.stage == "done"
             name = Text(row.name, MUTED if queued else TEXT)
@@ -643,6 +656,11 @@ class InvoiceApp(App):
             self.query_one(RunHeader).tier = self.runtime.tier
         self._show_view("all")
         self._set_mode(self.start)
+        self.set_interval(0.1, self._spin)
+
+    def _spin(self) -> None:
+        if self.mode == "processing":
+            self.query_one(RunFiles).spin()
 
     def _set_mode(self, mode: str, reload: bool = False) -> None:
         """Show New run, Processing or the Results views, with their header, focus and keys.
