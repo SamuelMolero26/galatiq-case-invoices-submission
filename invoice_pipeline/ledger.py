@@ -23,6 +23,7 @@ from invoice_pipeline.model import (
     Outcome,
     PaymentIssue,
     QueueItem,
+    UsdEquivalent,
     finding,
     normalize_invoice_number,
     vendor_key,
@@ -224,6 +225,7 @@ class Arrival:
     findings: list[Finding]  # every Finding the Decision saw (all of them are recorded)
     decision: Decision
     amount_due: Decimal | None
+    usd: UsdEquivalent | None = None  # what classification used; None when unreadable or no rate
 
 
 def _dec(text: str | None) -> Decimal | None:
@@ -304,6 +306,13 @@ def _extraction_audit(ingested) -> dict | None:
     }
 
 
+def _usd_evidence(usd: UsdEquivalent | None, invoice: Invoice | None) -> dict | None:
+    """The USD Equivalent as Reviewer evidence, with the currency it converts from."""
+    if usd is None or invoice is None:
+        return None
+    return {**usd.model_dump(mode="json"), "currency": invoice.currency}
+
+
 def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
     invoice, decision = new.ingested.invoice, new.decision
     record = {
@@ -314,6 +323,7 @@ def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
         "decision": decision,
         "raw_text": new.ingested.raw_text,
         "extraction": _extraction_audit(new.ingested),
+        "usd_equivalent": _usd_evidence(new.usd, invoice),
     }
     cols = dict(
         arrived_at=new.arrived_at.isoformat(),

@@ -107,6 +107,45 @@ def test_usd_invoice_has_no_usd_evidence(batch_ledger):
     assert _detail(batch_ledger, "invoice_1001.txt").usd is None
 
 
+def _rewrite_record(ledger_path, arrival_id, change) -> None:
+    """Edit one stored record in place, as a different writer (or an older one) would have."""
+    conn = ledger.connect(ledger_path)
+    try:
+        row = conn.execute("SELECT record FROM arrivals WHERE id = ?", (arrival_id,)).fetchone()
+        record = json.loads(row["record"])
+        change(record)
+        with ledger.write_txn(conn):
+            conn.execute(
+                "UPDATE arrivals SET record = ? WHERE id = ?", (json.dumps(record), arrival_id)
+            )
+    finally:
+        conn.close()
+
+
+def test_usd_evidence_does_not_depend_on_the_finding_wording(batch_ledger):
+    arrival_id = _arrival_id(batch_ledger, "invoice_1014.xml")
+
+    def reword(record):
+        for f in record["findings"]:
+            f["detail"] = "non-USD invoice (wording changed)"
+
+    _rewrite_record(batch_ledger, arrival_id, reword)
+    usd = service.arrival_detail(batch_ledger, arrival_id).usd
+
+    assert (usd.total, usd.currency, usd.amount) == (Decimal("4125.00"), "EUR", Decimal("4677.75"))
+    assert (usd.rate, usd.as_of, usd.buffer_pct) == (Decimal("1.08"), date(2026, 1, 2), 5)
+
+
+def test_legacy_record_without_usd_equivalent_has_no_usd_evidence(batch_ledger):
+    arrival_id = _arrival_id(batch_ledger, "invoice_1014.xml")
+
+    _rewrite_record(batch_ledger, arrival_id, lambda record: record.pop("usd_equivalent", None))
+    detail = service.arrival_detail(batch_ledger, arrival_id)
+
+    assert detail.usd is None  # no fallback to parsing the finding detail
+    assert detail.finding_codes == ["CURRENCY_NON_USD"]
+
+
 def test_rejected_detail_shows_findings_and_failed_stages(batch_ledger):
     detail = _detail(batch_ledger, "invoice_1009.json")
 

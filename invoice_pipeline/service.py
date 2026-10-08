@@ -6,7 +6,6 @@ Orchestration only: every rule lives in ingestion, validation, approval, ledger 
 import json
 import logging
 import os
-import re
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
@@ -138,7 +137,7 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
             )
             decision = decide(case_file, rt.agents)
         new = ledger.Arrival(
-            source, rt.now(), ingested, all_findings, decision, ctx.arrival.amount_due
+            source, rt.now(), ingested, all_findings, decision, ctx.arrival.amount_due, usd
         )
         with _stage(source, "ledger"):
             if identity is None:  # Partial/Incomplete Identity: nothing to version-check
@@ -573,7 +572,7 @@ def arrival_detail(ledger_path: Path, arrival_id: int) -> ArrivalDetail:
         ],
         notes=_notes(record, decision, row),
         finding_codes=list(dict.fromkeys(f.code.value for f in findings)),
-        usd=_usd_evidence(row, findings),
+        usd=_usd_evidence(row, record),
     )
 
 
@@ -695,23 +694,20 @@ def _where(code: FindingCode, line: int | None) -> str:
     return code.value if line is None else f"{code.value} line {line}"
 
 
-# The stored CURRENCY_NON_USD detail is the only persisted copy of the Reference Rate the
-# decision used. It is parsed, never recomputed, so a later rate change cannot rewrite history.
-_USD_DETAIL = re.compile(
-    r"USD equivalent (?P<amount>[\d.]+) USD at (?P<rate>[\d.]+) USD/\w+"
-    r" as of (?P<as_of>\d{4}-\d{2}-\d{2}) incl\. (?P<buffer>\d+)% safety buffer"
-)
+def _usd_evidence(row, record: dict) -> UsdEvidence | None:
+    """The USD Equivalent persisted with the decision, read back as stored (never recomputed).
 
-
-def _usd_evidence(row, findings: list[Finding]) -> UsdEvidence | None:
-    for f in findings:
-        if f.code is FindingCode.CURRENCY_NON_USD and (m := _USD_DETAIL.search(f.detail)):
-            return UsdEvidence(
-                total=Decimal(row["total"]),
-                currency=row["currency"],
-                amount=Decimal(m["amount"]),
-                rate=Decimal(m["rate"]),
-                as_of=date.fromisoformat(m["as_of"]),
-                buffer_pct=int(m["buffer"]),
-            )
-    return None
+    None for a USD invoice (at par, nothing to show), a currency without a Reference Rate, and
+    records written before the field existed.
+    """
+    usd = record.get("usd_equivalent")
+    if usd is None or usd["currency"] == "USD":
+        return None
+    return UsdEvidence(
+        total=Decimal(row["total"]),
+        currency=usd["currency"],
+        amount=Decimal(usd["amount"]),
+        rate=Decimal(usd["rate"]),
+        as_of=date.fromisoformat(usd["as_of"]),
+        buffer_pct=int(Decimal(usd["buffer"]) * 100),
+    )

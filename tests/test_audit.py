@@ -2,6 +2,7 @@
 
 import json
 import logging
+from decimal import Decimal
 
 import pytest
 from conftest import Harness, concur, text_reply, tool_reply
@@ -182,6 +183,26 @@ def test_sentinel_key_absent_from_record_caplog_repr(tmp_path, caplog):
     texts = [row["record"], caplog.text, repr(tier), str(tier), tier.model_dump_json()]
     texts += [json.dumps(h.chat.requests), json.dumps([e.detail for e in h.events], default=str)]
     assert all(SENTINEL not in text for text in texts)
+
+
+def test_record_persists_the_usd_equivalent_the_decision_used(tmp_path, grok):
+    h = Harness(tmp_path, grok, advice("eur"))
+    result = h.process("eur.json", {**SHORTAGE, "currency": "EUR"})
+
+    _, record = stored(h, result.arrival_id)
+
+    usd = record["usd_equivalent"]
+    assert Decimal(usd.pop("amount")) == Decimal("11340")  # 10,000 EUR x 1.08 x 1.05
+    assert usd == {"currency": "EUR", "rate": "1.08", "as_of": "2026-01-02", "buffer": "0.05"}
+
+
+def test_unreadable_record_has_no_usd_equivalent(tmp_path, grok):
+    h = Harness(tmp_path, grok)
+    result = h.process("broken.pdf", "not a pdf")
+
+    _, record = stored(h, result.arrival_id)
+
+    assert record["invoice"] is None and record["usd_equivalent"] is None
 
 
 # --- AUD-5: records written before this change stay readable ---------------------------
