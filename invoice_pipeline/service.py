@@ -482,6 +482,32 @@ def collect_files(path: Path | str) -> list[Path]:
     return sorted(p for p in path.iterdir() if p.is_file()) if path.is_dir() else [path]
 
 
+@dataclass(frozen=True)
+class Discovery:
+    """The files a run over a local source would process, in processing order."""
+
+    paths: tuple[Path, ...]
+    types: dict[str, int]  # file type (suffix) -> count, in first-seen order
+    problem: str | None = None  # why nothing can run from this source
+
+
+def discover(source: Path | str) -> Discovery:
+    """What `collect_files` finds at a local folder (or file) path; never reads the files."""
+    if not str(source).strip():
+        return Discovery((), {}, "type a local folder path")
+    path = Path(source).expanduser()
+    if not path.exists():
+        return Discovery((), {}, f"not found: {source}")
+    try:
+        paths = tuple(collect_files(path))
+    except OSError as exc:
+        return Discovery((), {}, f"cannot read {source}: {exc.strerror or exc}")
+    if not paths:
+        return Discovery((), {}, f"no files in {source}")
+    types = Counter(p.suffix.lower().lstrip(".") or "no type" for p in paths)
+    return Discovery(paths, dict(types))
+
+
 def process_path(path: Path | str, rt: Runtime) -> BatchResult:
     """Ingest one file, then decide, record and (when Approved) pay each invoice in it
     independently; a failing invoice is reported and the rest of the file continues."""

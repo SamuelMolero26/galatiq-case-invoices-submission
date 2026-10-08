@@ -1,5 +1,5 @@
-"""Reviewer TUI: the batch Results views (all / approved / needs review / rejected) and the
-reviewer actions (approve & pay, reject, retry).
+"""Reviewer TUI: New run (a local folder and what it holds), the batch Results views
+(all / approved / needs review / rejected) and the reviewer actions (approve & pay, reject, retry).
 
 Thin presentation over the service read models: widgets receive plain dataclasses and never
 touch the Ledger or any model role; only `InvoiceApp` calls `service.*`, and which actions an
@@ -22,13 +22,14 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, OptionList, Static
+from textual.widgets import Button, ContentSwitcher, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from invoice_pipeline import service
 from invoice_pipeline.service import (
     ArrivalDetail,
     ArrivalResult,
+    Discovery,
     Note,
     ResultRow,
     Results,
@@ -69,8 +70,12 @@ KEY_HINTS = (
     ("shift+tab", "prev"),
     ("↑↓ / j k", "select"),
     ("1-4", "jump view"),
+    ("n", "new run"),
     ("q", "quit"),
 )
+NEW_RUN_HINTS = (("tab", "results"),)
+DEFAULT_SOURCE = "data/invoices/"
+FUNNEL = ("ingest", "validate", "approve", "paid")
 ACTIONS = (  # (action, key, label, colour), in `ArrivalDetail.actions` order
     ("approve", "a", "approve & pay", GREEN),
     ("reject", "x", "reject", RED),
@@ -175,15 +180,20 @@ class RunHeader(Static):
     """`invoice-flow · batch run · N files` and the ingest -> paid funnel."""
 
     def show(self, results: Results) -> None:
+        self.funnel(results.files, results.funnel)
+
+    def funnel(self, files: int, counts: dict[str, int], colour: str = GREEN) -> None:
+        """The header for `files` files; a funnel stage without a count shows its name only."""
         left = Text.assemble(
-            ("invoice-flow", f"bold {TEXT}"), (f" · batch run · {results.files} files", MUTED)
+            ("invoice-flow", f"bold {TEXT}"), (f" · batch run · {files} files", MUTED)
         )
         right = Text()
-        for i, (stage, count) in enumerate(results.funnel.items()):
+        for i, stage in enumerate(FUNNEL):
             if i:
                 right.append(" → ", MUTED)
-            right.append(f"{stage} ", f"bold {TEXT}")
-            right.append(str(count), GREEN)
+            right.append(stage, f"bold {TEXT}")
+            if stage in counts:
+                right.append(f" {counts[stage]}", colour)
         grid = Table.grid(expand=True)
         grid.add_column()
         grid.add_column(justify="right")
@@ -318,10 +328,49 @@ def _key_hints(actions: tuple[str, ...] = ()) -> Text:
     return _hints([*KEY_HINTS[:-1], *(ACTION_KEY[a] for a in actions), KEY_HINTS[-1]])
 
 
-class InvoiceApp(App):
-    """The Results screen and the reviewer actions. The only class that calls the service.
+class SourcePane(Vertical):
+    """`new run · source`: the local folder a new run reads."""
 
-    Without a `runtime` (and no `bootstrap` arguments to build one) the results are read-only.
+    def compose(self) -> ComposeResult:
+        yield Static(Text("invoice directory", SOFT))
+        with Horizontal(id="source-row"):
+            yield Static(Text("❯", f"bold {GREEN}"), id="source-prompt")
+            yield Input(DEFAULT_SOURCE, placeholder=DEFAULT_SOURCE, id="source")
+        yield Static(
+            Text("Local folder path. Reads pdf, txt, csv, json and xml.", MUTED), id="source-help"
+        )
+        yield Static(id="source-status")
+
+    def say(self, message: str | None, colour: str = TEXT) -> None:
+        self.query_one("#source-status", Static).update(Text(message or "", colour))
+
+
+class FoundPane(VerticalScroll):
+    """`found`: the files a run over the source would process, grouped by type."""
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="found-body")
+
+    @property
+    def body(self) -> Static:
+        return self.query_one("#found-body", Static)
+
+    def show(self, discovery: Discovery) -> None:
+        if discovery.problem:
+            self.body.update(Text(discovery.problem, AMBER))
+            return
+        summary = Text(f"{len(discovery.paths)} files", TEXT)
+        for kind, count in discovery.types.items():
+            summary.append(f" · {count} {kind}", SOFT)
+        names = Text("\n".join(p.name for p in discovery.paths), TEXT)
+        self.body.update(Group(summary, Rule(style=RULE), names))
+
+
+class InvoiceApp(App):
+    """New run, the Results views and the reviewer actions. The only class that calls the service.
+
+    `start` is the mode it opens on: "results" or "new_run". Without a `runtime` (and no
+    `bootstrap` arguments to build one) the results are read-only.
     """
 
     CSS_PATH = "tui.tcss"
@@ -331,6 +380,7 @@ class InvoiceApp(App):
         Binding("shift+tab", "cycle_view(-1)", "prev view", priority=True, show=False),
         *(Binding(str(n), f"jump_view({n - 1})", show=False) for n in range(1, len(TABS) + 1)),
         *(Binding(key, f"act('{action}')", show=False) for action, key, _, _ in ACTIONS),
+        Binding("n", "new_run", show=False),
         Binding("q", "quit", "quit", show=False),
     ]
 
@@ -339,10 +389,13 @@ class InvoiceApp(App):
         ledger_path: Path | str,
         runtime: service.Runtime | None = None,
         bootstrap: argparse.Namespace | None = None,
+        start: str = "results",
     ):
         super().__init__()
         self.ledger_path = Path(ledger_path)
         self.runtime, self.bootstrap_args = runtime, bootstrap
+        self.start, self.mode = start, start
+        self.discovery: Discovery | None = None
         self.active_view = "all"
         self.results: Results | None = None
         self.retrying = False  # a retry worker is running: no other action until it ends
@@ -350,14 +403,21 @@ class InvoiceApp(App):
 
     def compose(self) -> ComposeResult:
         yield RunHeader(id="header")
-        yield TabBar(id="tabs")
-        with Horizontal(id="body"):
-            yield FileList(id="files")
-            yield DetailPane(id="detail")
+        with ContentSwitcher(initial=self.start, id="modes"):
+            with Vertical(id="results"):
+                yield TabBar(id="tabs")
+                with Horizontal(id="body"):
+                    yield FileList(id="files")
+                    yield DetailPane(id="detail")
+            with Horizontal(id="new_run"):
+                yield SourcePane(id="source-pane")
+                yield FoundPane(id="found")
         yield Static(_key_hints(), id="keys")
 
     def on_mount(self) -> None:
         self.query_one(FileList).border_title = "files"
+        self.query_one(SourcePane).border_title = "new run · source"
+        self.query_one(FoundPane).border_title = "found"
         self.query_one(DetailPane).say(None)
         try:
             if self.runtime is None and self.bootstrap_args is not None:
@@ -366,17 +426,49 @@ class InvoiceApp(App):
         except service.BootstrapError as exc:
             self.exit(return_code=1, message=f"cannot start: {exc}")
             return
-        self.query_one(RunHeader).show(self.results)
         self._show_view("all")
-        self.query_one(FileList).focus()
+        self._set_mode(self.start)
+
+    def _set_mode(self, mode: str) -> None:
+        """Show New run or the Results views, with their header, focus and keys."""
+        self.mode = mode
+        self.query_one(ContentSwitcher).current = mode
+        if mode == "new_run":
+            source = self.query_one("#source", Input)
+            self._discover(source.value)
+            self.query_one("#keys", Static).update(_hints(NEW_RUN_HINTS))
+            source.focus()
+        else:
+            self.query_one(RunHeader).show(self.results)
+            self._show_actions()
+            self.query_one(FileList).focus()
+
+    def action_new_run(self) -> None:
+        if not isinstance(self.screen, ModalScreen):
+            self._set_mode("new_run")
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "source":
+            self._discover(event.value)
+
+    def _discover(self, source: str) -> None:
+        self.discovery = service.discover(source)
+        self.query_one(FoundPane).show(self.discovery)
+        if self.mode == "new_run":
+            self.query_one(RunHeader).funnel(len(self.discovery.paths), {})
 
     def action_cycle_view(self, step: int) -> None:
         if isinstance(self.screen, ModalScreen):  # tab is a priority key: not under a dialog
+            return
+        if self.mode != "results":  # tab leaves New run for the view shown last
+            self._set_mode("results")
             return
         index = service.VIEWS.index(self.active_view)
         self._show_view(service.VIEWS[(index + step) % len(service.VIEWS)])
 
     def action_jump_view(self, index: int) -> None:
+        if self.mode != "results":
+            self._set_mode("results")
         self._show_view(service.VIEWS[index])
 
     def _show_view(self, view: str, keep: int | None = None) -> None:
@@ -408,14 +500,15 @@ class InvoiceApp(App):
 
     def _available(self) -> tuple[str, ...]:
         detail = self.query_one(DetailPane).detail
-        if self.runtime is None or detail is None or self.retrying:
+        if self.runtime is None or detail is None or self.retrying or self.mode != "results":
             return ()
         return detail.actions
 
     def _show_actions(self) -> None:
         available = self._available()
         self.query_one(ActionBar).show(available)
-        self.query_one("#keys", Static).update(_key_hints(available))
+        if self.mode == "results":
+            self.query_one("#keys", Static).update(_key_hints(available))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.action_act(event.button.id)
@@ -484,9 +577,10 @@ def _outcome(verb: str, result: ArrivalResult) -> tuple[str, str]:
 
 
 def run(ledger_path: Path, args: argparse.Namespace | None = None) -> int:
-    """Open the reviewer TUI; its runtime (LLM tier, inventory) is bootstrapped from `args`."""
+    """Open the reviewer TUI on New run; its runtime (LLM tier, inventory) is bootstrapped from
+    `args`, so a new run uses the same `--llm` tier as the batch CLI."""
     flags = {"llm": None, "inventory": None, **vars(args or argparse.Namespace())}
     flags["ledger"] = str(ledger_path)
-    app = InvoiceApp(ledger_path, bootstrap=argparse.Namespace(**flags))
+    app = InvoiceApp(ledger_path, bootstrap=argparse.Namespace(**flags), start="new_run")
     app.run()
     return app.return_code or 0
