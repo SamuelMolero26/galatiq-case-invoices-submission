@@ -1,12 +1,16 @@
 """The Rule Engine: one Decision per arrival, from the Case File and injected model roles."""
 
 import re
+from collections import Counter
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
 from invoice_pipeline.model import (
     Agents,
     CaseFile,
+    CriticAttempt,
+    CriticRecord,
     Decision,
     Finding,
     FindingCode,
@@ -103,14 +107,8 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
             )
         elif failures := check_bounds(case_file):
             decision = _decision(Outcome.NEEDS_REVIEW, failures, 5, bound_failures=failures)
-        else:
-            # Slice 1 has no online roles: within-bound Warnings never get a usable Critic answer.
-            return _decision(
-                Outcome.NEEDS_REVIEW,
-                [f"UNREVIEWED_WARNINGS: no usable Critic answer for {names}"],
-                5,
-                unreviewed_warnings=True,
-            )
+        else:  # the full gate: its Decision is final and carries no advisory
+            return orchestrate(case_file, agents)
     else:  # row 6: Approved unless the escalate-only review escalates; never adds an approval
         call = agents.escalate_review(case_file)
         answer = call.answer or {}
@@ -334,3 +332,135 @@ def _check_one(judge: _Evidence, root: dict, tool_calls, a: WarningAssessment):
         cause = GuardrailCause.SELF_EVIDENCE if selfish else GuardrailCause.IRRELEVANT_EVIDENCE
         failures.append(_failure(cause, where, "no evidence supports this Warning's explanation"))
     return failures
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What one critic attempt amounts to under the gate."""
+
+    approved: bool
+    usable: bool  # False: no usable answer, which fails closed to Unreviewed Warnings
+    retry: bool  # True: a correction attempt may follow
+    reasons: list[str]
+    feedback: str | None = None  # what attempt 2 is told
+
+
+def accept_verdict(
+    case_file: CaseFile, attempt: CriticAttempt, tool_calls: list[ToolCall]
+) -> Verdict:
+    """The deterministic gate between model answers and an approval (pure).
+
+    Approved only when every Warning is within its bound, has a guardrail-accepted explained
+    assessment (re-checked here, whatever the record claims), and has exactly one Verifier check
+    with `holds=True`. A false claim is usable and correctable; unexplained finality is usable
+    and final; a malformed or absent answer is no usable answer.
+    """
+    assessor, verifier = attempt.assessor, attempt.verifier
+    if not assessor.accepted:
+        if final := [f for f in assessor.failures if not f.correctable]:
+            return Verdict(False, True, False, [_refusal(f) for f in final])
+        return Verdict(False, False, False, [assessor.error or "no usable assessment"])
+    if failures := check_bounds(case_file):
+        return Verdict(False, True, False, failures)
+    if guardrail := check_assessments(case_file, assessor.assessments, tool_calls):
+        return Verdict(False, True, False, [_refusal(f) for f in guardrail])
+    if verifier is None or not verifier.accepted:
+        error = verifier.error if verifier else None
+        return Verdict(False, False, False, [error or "no usable Verifier answer"])
+    wanted = list(dict.fromkeys((f.code, f.line) for f in _of(case_file, Severity.WARNING)))
+    counts = Counter((c.code, c.line) for c in verifier.checks)
+    malformed = (
+        [f"Verifier check missing for {_label(*key)}" for key in wanted if key not in counts]
+        + [
+            f"Verifier check for {_label(*key)} is not an assessed Warning"
+            for key in counts
+            if key not in wanted
+        ]
+        + [f"Verifier gave {n} checks for {_label(*key)}" for key, n in counts.items() if n > 1]
+    )
+    if malformed:
+        return Verdict(False, False, False, malformed)
+    false = [c for c in verifier.checks if not c.holds]
+    if false:
+        reasons = [
+            f"{_label(c.code, c.line)}: the Verifier rejected the explanation: {c.rationale}"
+            for c in false
+        ]
+        return Verdict(False, True, True, reasons, feedback=" ".join(reasons))
+    return Verdict(True, True, False, [])
+
+
+def _refusal(failure: GuardrailFailure) -> str:
+    return f"{failure.where}: {failure.message} [{failure.cause.value}]"
+
+
+def _step(agents: Agents, event: str, attempt: int) -> None:
+    try:
+        agents.on_step(event, {"attempt": attempt})
+    except Exception:  # an observer never changes a decision
+        pass
+
+
+def _attempt(case_file: CaseFile, agents: Agents, number: int, feedback, scratch, calls):
+    """Run one Assessor + Verifier attempt. Returns the record, or None when a role gave nothing."""
+    _step(agents, "assess", number)
+    assessed = agents.assess(case_file, number, feedback, scratch)
+    if assessed is None:
+        return None
+    calls.extend(assessed.tool_calls)
+    verified = None
+    if assessed.accepted and not check_assessments(case_file, assessed.assessments, calls):
+        _step(agents, "verify", number)  # only guardrail-accepted output reaches the Verifier
+        verified = agents.verify(case_file, assessed.assessments, list(calls), number)
+    return CriticAttempt(attempt=number, feedback=feedback, assessor=assessed, verifier=verified)
+
+
+def orchestrate(case_file: CaseFile, agents: Agents) -> Decision:
+    """Row 5 within bound: at most two Assessor+Verifier attempts; only the final one can approve.
+
+    Never raises. No usable answer (offline, transport, exhausted tries, a raising role, a
+    malformed Verifier answer) is Unreviewed Warnings; a usable refusal is Needs Review.
+    """
+    names = ", ".join(_where(f) for f in _of(case_file, Severity.WARNING))
+    scratch: dict = {}
+    attempts: list[CriticAttempt] = []
+    calls: list[ToolCall] = []
+    verdict = Verdict(False, False, False, ["no usable Critic answer"])
+    try:
+        feedback = None
+        for number in (1, 2):
+            if number == 2:
+                _step(agents, "correct", number)
+            try:
+                record = _attempt(case_file, agents, number, feedback, scratch, calls)
+            except Exception as exc:  # a role that raises is no answer
+                verdict = Verdict(False, False, False, [f"{type(exc).__name__}: {exc}"])
+                break
+            if record is None:
+                verdict = Verdict(False, False, False, ["no usable Critic answer"])
+                break
+            attempts.append(record)
+            verdict = accept_verdict(case_file, record, calls)
+            if verdict.approved or not verdict.retry:
+                break
+            feedback = verdict.feedback
+    finally:
+        for cleanup in scratch.get("cleanup", []):
+            try:
+                cleanup()
+            except Exception:
+                pass
+    critic = CriticRecord(attempts=attempts) if attempts else None
+    if verdict.approved:
+        reasons = [f"LLM_CRITIC: {names} explained by evidence and verified"]
+        return _decision(Outcome.APPROVED, reasons, 5, decided_by="llm_critic", critic=critic)
+    if not verdict.usable:
+        return _decision(
+            Outcome.NEEDS_REVIEW,
+            [f"UNREVIEWED_WARNINGS: no usable Critic answer for {names}"],
+            5,
+            unreviewed_warnings=True,
+            critic=critic,
+        )
+    reasons = [f"CRITIC_NOT_ACCEPTED: {reason}" for reason in verdict.reasons]
+    return _decision(Outcome.NEEDS_REVIEW, reasons, 5, critic=critic)
