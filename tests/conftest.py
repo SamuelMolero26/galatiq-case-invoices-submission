@@ -164,3 +164,29 @@ def no_fs_access():
             yield attempts
 
     return guard
+
+
+@pytest.fixture
+def make_case(catalog):
+    """Case File with explicit findings/arrival, for exercising a chosen precedence row."""
+    from invoice_pipeline.model import FindingCode, finding
+
+    def make(codes=(), kind="new", quantity="1", unit_price="250", vendor="Acme Corp", lines=(0,)):
+        inv = invoice([line("WidgetA", unit_price, quantity)], vendor=vendor)
+        findings = [finding(FindingCode(code), "scripted", ln) for code in codes for ln in lines]
+        arrival = (
+            ArrivalSummary(kind="duplicate", duplicate_of=1, paid_to_date=inv.total)
+            if kind == "duplicate"
+            else ArrivalSummary(kind="new")
+        )
+        return build_case_file(inv, findings, arrival, None, catalog, [], 0, online=True)
+
+    return make
+
+
+def concur(evidence=("invoice.vendor",), verdict="concur", rationale="nothing needs a human"):
+    import json
+
+    return text_reply(
+        json.dumps({"verdict": verdict, "evidence": list(evidence), "rationale": rationale})
+    )
