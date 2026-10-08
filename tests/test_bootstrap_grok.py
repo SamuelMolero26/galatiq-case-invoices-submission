@@ -82,3 +82,11 @@ class TestBootstrapGrok:
         call = rt.agents.escalate_review(case_file_for(make_invoice()))
         assert (call.answer, call.error) == (None, "offline tier")
         assert stub_llm.requests == []
+
+    def test_auto_grok_with_both_fake_vars_set_selects_grok(
+        self, tmp_path, monkeypatch, stub_llm
+    ):
+        monkeypatch.setenv("XAI_API_KEY", "fake-key")
+        monkeypatch.setenv("GROK_BASE_URL", stub_llm.url)
+        rt = service.bootstrap(args_for(tmp_path, None))
+        assert rt.tier == "grok"
