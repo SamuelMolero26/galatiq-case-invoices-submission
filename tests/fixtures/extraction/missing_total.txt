@@ -1,0 +1,7 @@
+Vendor: Acme Corp
+Invoice: INV-2001
+Date: 2026-01-05
+
+WidgetA  qty: 4  unit price: $250.00
+
+Please remit the amount of 1,000.00 within 30 days.
