@@ -9,6 +9,9 @@ dependencies = [
     "rich>=14",
 ]
 
+[project.optional-dependencies]
+tui = ["textual==8.2.8"]  # `python main.py tui`; batch and `review --list` never need it
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
