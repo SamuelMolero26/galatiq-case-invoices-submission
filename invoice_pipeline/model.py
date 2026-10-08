@@ -160,6 +160,7 @@ class Ingested(BaseModel):
     unreadable_reason: str | None = None  # "<step>: <ErrorType>: <message>" when invoice is None
     raw_text: str | None = None  # TXT / PDF text layer; input of the Extraction Fallback
     missing_required: list[Literal["vendor", "invoice_number", "total", "items"]] = []
+    extraction: "RoleCall | None" = None  # noqa: UP037  Fallback audit; RoleCall is defined below
 
 
 class UsdEquivalent(BaseModel):
@@ -336,6 +337,9 @@ class RoleCall(BaseModel):
     error: str | None = None
 
 
+Ingested.model_rebuild()
+
+
 class Outcome(StrEnum):
     APPROVED = "approved"
     NEEDS_REVIEW = "needs_review"
@@ -372,6 +376,7 @@ class Agents:
     escalate_review: Callable[[CaseFile], RoleCall]
     advise: Callable[[CaseFile, Decision], RoleCall]
     on_step: Callable[[str, dict], None] = field(default=lambda event, detail: None)
+    extract: Callable[[str, list[str]], RoleCall] | None = None  # online only
 
 
 class PaymentIssue(BaseModel):

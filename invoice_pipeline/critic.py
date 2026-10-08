@@ -4,7 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD, check_assessments
+from invoice_pipeline import extraction
+from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD, check_assessments, label
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.llm import CorrectableError, FinalError, TierConfig, ask, chat, role_call
 from invoice_pipeline.model import (
@@ -32,14 +33,6 @@ from invoice_pipeline.tools import TOOL_SCHEMAS, ToolRunner
 from invoice_pipeline.validation import PRICE_TOLERANCE, aggregate_quantities, price_deviations
 
 OFFLINE_TIER = "offline tier"
-
-
-def _where_of(code: FindingCode, line: int | None) -> str:
-    return f"{code}" + (f" line {line}" if line is not None else "")
-
-
-def _where(entry) -> str:
-    return _where_of(entry.code, entry.line)
 
 
 def build_case_file(
@@ -83,11 +76,9 @@ def _checklist(warnings: list[Finding]) -> dict[FindingCode, tuple[str, ...]]:
 
 def _decision_context(arrival: ArrivalSummary, findings: list[Finding]) -> list[str]:
     """Pre-decision facts for advisory reasoning only; assessors never receive them."""
-
-    def where(f: Finding) -> str:
-        return f.code.value + (f" line {f.line}" if f.line is not None else "")
-
-    return [f"arrival: {arrival.kind}"] + [f"{f.severity.value}: {where(f)}" for f in findings]
+    return [f"arrival: {arrival.kind}"] + [
+        f"{f.severity.value}: {label(f.code, f.line)}" for f in findings
+    ]
 
 
 def offline_role(role: str) -> RoleCall:
@@ -253,6 +244,9 @@ def online_agents(tier: TierConfig, tool_factory=None, chat_fn=chat) -> Agents:
         verify=verify_role,
         escalate_review=escalate_review,
         advise=advise,
+        extract=lambda raw_text, fields: extraction.extract(
+            tier, raw_text, fields, chat_fn=chat_fn
+        ),
     )
 
 
@@ -270,10 +264,10 @@ def _parse_entries[M: BaseModel](
     parsed: list[M | None] = []
     errors = []
     for index, item in enumerate(data[key]):
-        label = f"{key}[{index}]"
+        slot = f"{key}[{index}]"
         if not isinstance(item, dict):
             parsed.append(None)
-            errors.append(f"{label}: must be a JSON object")
+            errors.append(f"{slot}: must be a JSON object")
             continue
         try:
             parsed.append(model.model_validate_json(json.dumps(item), strict=True))
@@ -281,7 +275,7 @@ def _parse_entries[M: BaseModel](
             parsed.append(None)
             for problem in exc.errors():
                 field = ".".join(str(part) for part in problem["loc"]) or "value"
-                errors.append(f"{label}: field '{field}': {problem['msg']}")
+                errors.append(f"{slot}: field '{field}': {problem['msg']}")
     return parsed, errors
 
 
@@ -324,8 +318,10 @@ def parse_verifier(
     known = {(e.code, e.line) for e in entries if e is not None}
     for index, entry in enumerate(entries):
         if entry is not None and (entry.code, entry.line) not in expected:
-            errors.append(f"checks[{index}]: not an assessed Warning ({_where(entry)})")
-    errors += [f"missing check for {_where_of(*want)}" for want in expected if want not in known]
+            errors.append(
+                f"checks[{index}]: not an assessed Warning ({label(entry.code, entry.line)})"
+            )
+    errors += [f"missing check for {label(*want)}" for want in expected if want not in known]
     return _correction("checks", entries, errors) if errors else entries
 
 
@@ -334,8 +330,8 @@ def _guardrail_message(failures: list[GuardrailFailure]) -> str:
     return f"The evidence guardrail refused the answer: {listed}. Resend the full JSON answer."
 
 
-def _failed_call[T: BaseModel](kind: type[T], attempt: int, tier: TierConfig, error: str, **extra):
-    return kind(attempt=attempt, model=tier.model, error=error, **extra)
+def _failed_call[T: BaseModel](kind: type[T], attempt: int, tier: TierConfig, error: str) -> T:
+    return kind(attempt=attempt, model=tier.model, error=error)
 
 
 def assess(
