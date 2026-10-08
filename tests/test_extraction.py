@@ -414,8 +414,8 @@ def test_extracted_invoice_number_colliding_with_paid_arrival_is_needs_review_in
     assert result.model_notes == "extraction"
     row, record = stored(h, result.arrival_id)
     assert row["duplicate_of"] == paid_id and record["decision"]["duplicate_of"] == paid_id
-    assert record["extraction"]["role"] == "extraction"
-    assert record["extraction"]["answer"] == {"invoice_number": "INV-2001"}
+    assert record["extraction"]["call"]["role"] == "extraction"
+    assert record["extraction"]["call"]["answer"] == {"invoice_number": "INV-2001"}
     assert result.arrival_id in [q.arrival_id for q in service.review_queue(h.ledger_path)]
 
 
@@ -453,21 +453,38 @@ def test_extracted_total_only_collision_unaffected_still_duplicate(tmp_path, gro
     assert f"arrival #{paid_id}" in result.reasons[0] and h.paid == []
 
 
-def test_extracted_collision_can_be_rejected_and_approval_fails_closed_without_amount(
-    tmp_path, grok
-):
+def test_extracted_collision_can_be_rejected(tmp_path, grok):
     h = Harness(tmp_path, grok, reply(invoice_number="INV-2001"))
     paid_invoice(h)
-    first = h.process("a.txt", txt(number=None, total="1,000.00", note="Re INV-2001"))
-    h.chat.replies.append(reply(invoice_number="INV-2001"))
-    second = h.process("b.txt", txt(number=None, total="1,000.00", note="Re INV-2001"))
+    result = h.process("a.txt", txt(number=None, total="1,000.00", note="Re INV-2001"))
 
-    # Not refused as a Duplicate (it is a normal Needs Review), but a collision arrival carries
-    # no payable amount (`classify` sets none), so approval stays closed: reject is the path.
-    with pytest.raises(service.ResolutionRefused) as caught:
-        service.resolve(h.rt, first.arrival_id, "approve", "checked, it is a new invoice")
-    assert "no known positive payable amount" in str(caught.value)
-    assert "Duplicate" not in str(caught.value)
-    rejected = service.resolve(h.rt, second.arrival_id, "reject", "same invoice as the paid one")
+    rejected = service.resolve(h.rt, result.arrival_id, "reject", "same invoice as the paid one")
 
     assert rejected.state == "logged_rejection" and h.paid == []
+
+
+def test_extracted_collision_is_reject_only(tmp_path, grok):
+    # ponytail: reject-only by owner decision; approving would exceed the per-identity
+    # payment cap (ledger.claim). Correcting the identity on approve is the upgrade path.
+    h = Harness(tmp_path, grok, reply(invoice_number="INV-2001"))
+    paid_invoice(h)
+    result = h.process("a.txt", txt(number=None, total="1,000.00", note="Re INV-2001"))
+    assert result.decision == Outcome.NEEDS_REVIEW and h.paid == []
+
+    with pytest.raises(service.ResolutionRefused, match="no known positive payable amount"):
+        service.resolve(h.rt, result.arrival_id, "approve", "checked, a new invoice")
+
+    assert h.paid == []
+
+
+def test_real_duplicate_still_not_approvable(tmp_path, grok):
+    h = Harness(tmp_path, grok)
+    paid_id = paid_invoice(h)
+    result = h.process("invoice.txt", txt(total="1,000.00"))
+    assert result.state == "duplicate"
+
+    with pytest.raises(service.ResolutionRefused) as caught:
+        service.resolve(h.rt, result.arrival_id, "approve", "pay it anyway")
+
+    assert f"a Duplicate of arrival #{paid_id}" in str(caught.value) and h.paid == []
+    assert result.arrival_id not in [q.arrival_id for q in service.review_queue(h.ledger_path)]

@@ -1,4 +1,5 @@
-"""Command line: `--invoice_path` runs a batch, `review --list` prints the Review Queue.
+"""Command line: `--invoice_path` runs a batch, `review --list` prints the Review Queue, and
+`tui` browses the results in a terminal UI (Textual, an optional extra imported only there).
 
 Presentation only. There is deliberately no command that resolves or settles an entry.
 """
@@ -16,6 +17,10 @@ from invoice_pipeline import service
 from invoice_pipeline.model import Event, QueueItem
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE = 0, 1, 2  # usage = argparse's own code
+TUI_EXTRA = (
+    "the tui command needs Textual, an optional extra: `uv sync --extra tui`"
+    " or `pip install 'invoice-pipeline[tui]'`"
+)
 
 
 def _global_flags(parser: argparse.ArgumentParser, default=None) -> None:
@@ -37,6 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     review = commands.add_parser("review", help="show the Review Queue (read-only)")
     review.add_argument("--list", action="store_true", required=True, help="list the queue")
     _global_flags(review, default=argparse.SUPPRESS)  # also accepted after the subcommand
+    tui = commands.add_parser("tui", help="browse the batch results (needs the tui extra)")
+    _global_flags(tui, default=argparse.SUPPRESS)
     return parser
 
 
@@ -149,6 +156,21 @@ def _list_queue(args, ui) -> int:
     return EXIT_OK
 
 
+def _run_tui(args) -> int:
+    ledger_path = service.ledger_path_of(args)
+    if not ledger_path.exists():
+        _error(f"cannot start: ledger not found: {ledger_path}")
+        return EXIT_FAILED
+    try:
+        from invoice_pipeline import tui  # lazy: Textual is an optional extra
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").partition(".")[0] != "textual":
+            raise
+        _error(TUI_EXTRA)
+        return EXIT_FAILED
+    return tui.run(ledger_path, args)
+
+
 def main(argv: list[str] | None = None, out=None) -> int:
     out = out or sys.stdout
     parser = build_parser()
@@ -158,7 +180,9 @@ def main(argv: list[str] | None = None, out=None) -> int:
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
     if args.command is None and not args.invoice_path:
         parser.print_usage(sys.stderr)
-        _error("give --invoice_path, or the review command")
+        _error("give --invoice_path, or the review or tui command")
         return EXIT_USAGE
+    if args.command == "tui":
+        return _run_tui(args)
     ui = JsonLines(out) if args.json or not out.isatty() else RichOutput(out)
     return _list_queue(args, ui) if args.command == "review" else _run_batch(args, ui)

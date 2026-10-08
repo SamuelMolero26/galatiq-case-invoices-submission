@@ -1,4 +1,5 @@
-"""Entry point: `python main.py --invoice_path=<file|dir>` or `python main.py review --list`."""
+"""Entry point: `python main.py --invoice_path=<file|dir>`, `python main.py review --list`,
+or `python main.py tui` (needs the optional `tui` extra)."""
 
 import sys
 

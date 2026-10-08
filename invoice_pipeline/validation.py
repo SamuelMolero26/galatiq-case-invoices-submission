@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.model import Finding, FindingCode, Invoice, finding, vendor_key
+from invoice_pipeline.rates import REFERENCE_RATES, usd_equivalent
 
 PRICE_TOLERANCE = Decimal("0.15")  # the single price-tolerance constant
 VENDOR_LOOKALIKE_THRESHOLD = 0.85  # SequenceMatcher ratio at or above this is a lookalike
@@ -258,13 +259,22 @@ def _prices(invoice: Invoice, catalog: Catalog) -> list[Finding]:
 
 
 def _currency(invoice: Invoice) -> list[Finding]:
-    """Slice 1 fails closed on any non-USD invoice; Reference Rates arrive in slice 3."""
-    if invoice.currency == "USD":
+    """Non-USD is a Warning stating its USD Equivalent; without a Reference Rate it fails closed."""
+    currency = invoice.currency
+    if currency == "USD":
         return []
-    return [
-        finding(FindingCode.CURRENCY_NON_USD, f"invoice currency is {invoice.currency}"),
-        finding(
-            FindingCode.CURRENCY_NO_RATE,
-            f"currency not supported yet: no reference rate for {invoice.currency}",
-        ),
-    ]
+    if currency not in REFERENCE_RATES:
+        return [
+            finding(
+                FindingCode.CURRENCY_NON_USD,
+                f"invoice currency is {currency}; USD equivalent unavailable",
+            ),
+            finding(FindingCode.CURRENCY_NO_RATE, f"no reference rate for {currency}"),
+        ]
+    detail = f"invoice currency is {currency}"
+    if invoice.total is not None and (usd := usd_equivalent(invoice.total, currency)):
+        detail += (
+            f"; USD equivalent {usd.amount:.2f} USD at {usd.rate} USD/{currency}"
+            f" as of {usd.as_of.isoformat()} incl. {usd.buffer * 100:.0f}% safety buffer"
+        )
+    return [finding(FindingCode.CURRENCY_NON_USD, detail)]

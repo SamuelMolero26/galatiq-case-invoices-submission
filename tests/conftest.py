@@ -7,6 +7,7 @@ import json
 import os
 import socket
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -228,3 +229,25 @@ class Harness:
     @property
     def names(self):
         return [e.name for e in self.events]
+
+
+SAMPLE_INVOICES = Path(__file__).resolve().parent.parent / "data" / "invoices"
+
+
+@pytest.fixture
+def batch_ledger(tmp_path) -> Path:
+    """A Ledger holding one offline batch run over the sample invoices in `data/invoices`."""
+    from invoice_pipeline import catalog
+    from invoice_pipeline.critic import offline_agents
+
+    inventory, ledger_path = tmp_path / "inventory.db", tmp_path / "ledger.db"
+    catalog.seed(inventory)
+    rt = service.Runtime(
+        catalog=catalog.load_catalog(inventory),
+        ledger_path=ledger_path,
+        agents=offline_agents(),
+        pay_fn=lambda *args: {"status": "success"},
+    )
+    batch = service.run_batch(service.collect_files(SAMPLE_INVOICES), rt)
+    assert not batch.failed, [str(f) for f in batch.failed]
+    return ledger_path

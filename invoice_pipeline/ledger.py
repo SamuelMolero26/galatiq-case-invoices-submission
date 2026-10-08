@@ -23,6 +23,7 @@ from invoice_pipeline.model import (
     Outcome,
     PaymentIssue,
     QueueItem,
+    UsdEquivalent,
     finding,
     normalize_invoice_number,
     vendor_key,
@@ -224,6 +225,7 @@ class Arrival:
     findings: list[Finding]  # every Finding the Decision saw (all of them are recorded)
     decision: Decision
     amount_due: Decimal | None
+    usd: UsdEquivalent | None = None  # what classification used; None when unreadable or no rate
 
 
 def _dec(text: str | None) -> Decimal | None:
@@ -293,24 +295,51 @@ _STATE = {
 }
 
 
-def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
-    invoice, decision = new.ingested.invoice, new.decision
-    record = {
+def _extraction_audit(ingested) -> dict | None:
+    """The Extraction Fallback audit: what was asked, what was supplied, and the call itself."""
+    if ingested.extraction is None:
+        return None
+    return {
+        "requested": ingested.missing_required,
+        "supplied": ingested.invoice.extracted_fields if ingested.invoice else [],
+        "call": ingested.extraction,
+    }
+
+
+def _usd_evidence(usd: UsdEquivalent | None, invoice: Invoice | None) -> dict | None:
+    """The USD Equivalent as Reviewer evidence, with the currency it converts from."""
+    if usd is None or invoice is None:
+        return None
+    return {**usd.model_dump(mode="json"), "currency": invoice.currency}
+
+
+def _record(new: Arrival) -> dict:
+    """The stored record: everything the Decision saw, plus the Reviewer evidence."""
+    invoice = new.ingested.invoice
+    return {
         "invoice": invoice,
         "findings": new.findings,
         "repairs": new.ingested.repairs,
         "unreadable_reason": new.ingested.unreadable_reason,
-        "extraction": new.ingested.extraction,
-        "decision": decision,
+        "decision": new.decision,
+        "raw_text": new.ingested.raw_text,
+        "extraction": _extraction_audit(new.ingested),
+        "usd_equivalent": _usd_evidence(new.usd, invoice),
     }
+
+
+def _dumps(record: dict) -> str:
+    return json.dumps(record, default=lambda model: model.model_dump(mode="json"))
+
+
+def _decided_columns(new: Arrival) -> dict:
+    """The columns a Decision sets: outcome, state, payable amount and the invoice identity."""
+    invoice, decision = new.ingested.invoice, new.decision
     cols = dict(
-        arrived_at=new.arrived_at.isoformat(),
-        source=new.source,
         decision=decision.outcome.value,
         state=_STATE[decision.outcome],
         amount_due=_text(new.amount_due),
         duplicate_of=decision.duplicate_of,
-        record=json.dumps(record, default=lambda model: model.model_dump(mode="json")),
     )
     if invoice is not None:
         cols |= dict(
@@ -321,12 +350,22 @@ def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
             currency=invoice.currency,
             total=_text(invoice.total),
         )
+    return cols
+
+
+def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
+    cols = dict(
+        arrived_at=new.arrived_at.isoformat(),
+        source=new.source,
+        **_decided_columns(new),
+        record=_dumps(_record(new)),
+    )
     names = ", ".join(cols)
     marks = ", ".join("?" * len(cols))
     arrival_id = conn.execute(
         f"INSERT INTO arrivals (seq, {names}) VALUES ({_NEXT_SEQ}, {marks})", tuple(cols.values())
     ).lastrowid
-    if decision.outcome is Outcome.APPROVED:
+    if new.decision.outcome is Outcome.APPROVED:
         claim(conn, arrival_id, new.arrived_at)
     return arrival_id
 
@@ -344,12 +383,56 @@ def record_if_unchanged(
         return _insert(conn, new)
 
 
+class ArrivalChanged(Exception):
+    """The arrival being decided again was changed meanwhile (e.g. resolved); nothing written."""
+
+
+def replace_if_unchanged(
+    conn: sqlite3.Connection,
+    arrival_id: int,
+    seq: int,
+    identity: tuple[str, str] | None,
+    version: int,
+    new: Arrival,
+) -> int | None:
+    """Write phase of a retry: replace one arrival's Decision in place (same id and arrival time).
+
+    Raises ArrivalChanged when the row itself changed since `seq` was read. Returns None with
+    nothing written when only its identity changed meanwhile (decide again), else the id. The
+    replaced Decision is kept in the record's `prior_decisions`; an Approved one is claimed under
+    the same cap guard as a new arrival.
+    """
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT seq, record FROM arrivals WHERE id = ?", (arrival_id,)
+        ).fetchone()
+        if row is None or row["seq"] != seq:
+            raise ArrivalChanged(f"arrival #{arrival_id} changed while it was being decided again")
+        if identity is not None and state_version(conn, identity) != version:
+            return None
+        old = json.loads(row["record"])
+        record = _record(new) | {
+            "prior_decisions": [*old.get("prior_decisions", []), old["decision"]]
+        }
+        update_arrival(conn, arrival_id, **_decided_columns(new), record=_dumps(record))
+        if new.decision.outcome is Outcome.APPROVED:
+            claim(conn, arrival_id, new.arrived_at)
+    return arrival_id
+
+
 VENDOR_HISTORY_LIMIT = 10  # most recent prior arrivals shown to the Critic
 
 
-def vendor_history(conn: sqlite3.Connection, key: str) -> tuple[list[HistoryEntry], int]:
-    """The vendor's newest prior arrivals (newest first) and the count of all of them."""
-    total = conn.execute("SELECT COUNT(*) FROM arrivals WHERE vendor_key = ?", (key,)).fetchone()[0]
+def vendor_history(
+    conn: sqlite3.Connection, key: str, exclude: int | None = None
+) -> tuple[list[HistoryEntry], int]:
+    """The vendor's newest other arrivals (newest first) and the count of all of them.
+
+    `exclude` leaves out the arrival being decided again, so it is never its own history.
+    """
+    total = conn.execute(
+        "SELECT COUNT(*) FROM arrivals WHERE vendor_key = ? AND id IS NOT ?", (key, exclude)
+    ).fetchone()[0]
     entries = [
         HistoryEntry(
             number=r["invoice_number"] or "",
@@ -361,8 +444,8 @@ def vendor_history(conn: sqlite3.Connection, key: str) -> tuple[list[HistoryEntr
         for r in conn.execute(
             "SELECT invoice_number, total, currency, state,"
             " json_extract(record, '$.invoice.invoice_date') AS invoice_date"
-            " FROM arrivals WHERE vendor_key = ? ORDER BY id DESC LIMIT ?",
-            (key, VENDOR_HISTORY_LIMIT),
+            " FROM arrivals WHERE vendor_key = ? AND id IS NOT ? ORDER BY id DESC LIMIT ?",
+            (key, exclude, VENDOR_HISTORY_LIMIT),
         )
     ]
     return entries, total

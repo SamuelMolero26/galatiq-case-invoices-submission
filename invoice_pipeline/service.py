@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,7 +20,22 @@ from invoice_pipeline.approval import decide, decide_unreadable
 from invoice_pipeline.catalog import Catalog, CatalogError
 from invoice_pipeline.critic import build_case_file, offline_agents, online_agents
 from invoice_pipeline.llm import ConfigError, select_tier
-from invoice_pipeline.model import Agents, Event, FindingCode, Ingested, QueueItem, vendor_key
+from invoice_pipeline.model import (
+    Agents,
+    CriticAttempt,
+    Decision,
+    Event,
+    Finding,
+    FindingCode,
+    Ingested,
+    Invoice,
+    PaymentIssue,
+    QueueItem,
+    RoleCall,
+    Severity,
+    vendor_key,
+)
+from invoice_pipeline.rates import usd_equivalent
 from invoice_pipeline.tools import ToolRunner, open_readonly
 from invoice_pipeline.validation import validate
 
@@ -91,29 +106,36 @@ def _stage(file: str, stage: str):
         raise ProcessingFailure(file, stage, f"{type(exc).__name__}: {exc}") from exc
 
 
-def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
+def record_arrival(
+    conn, ingested: Ingested, source: str, rt: Runtime, replacing: tuple[int, int] | None = None
+) -> int:
     """Validate, then read-decide-write until the identity's version holds; returns the arrival id.
 
     No database lock is held while deciding. A changed identity discards the Decision and decides
     again on the fresh history; `MAX_DECIDE_ATTEMPTS` changes in a row is a processing failure.
+    `replacing` is `(arrival_id, seq)` of an existing arrival whose Decision a retry replaces in
+    place (`ledger.replace_if_unchanged`) instead of recording a new arrival.
     """
+    exclude = replacing[0] if replacing else None
     invoice = ingested.invoice
     with _stage(source, "validation"):
         findings = [*ingested.findings, *validate(invoice, rt.catalog)]
+    # classification only: the Reviewer and Heightened Scrutiny read it; payment never does
+    usd = usd_equivalent(invoice.total, invoice.currency) if invoice.total is not None else None
     _notify(rt, Event("validated", source, {"findings": [f.code.value for f in findings]}))
     identity, key = invoice.identity(), vendor_key(invoice.vendor)
     for attempt in range(1, MAX_DECIDE_ATTEMPTS + 1):
         with _stage(source, "ledger"):
             rows, version = ledger.read_identity(conn, identity) if identity else ([], 0)
             ctx = ledger.classify(rows, invoice)
-            history, total = ledger.vendor_history(conn, key) if key else ([], 0)
+            history, total = ledger.vendor_history(conn, key, exclude) if key else ([], 0)
         all_findings = [*findings, *ctx.findings]
         with _stage(source, "approval"):
             case_file = build_case_file(
                 invoice,
                 all_findings,
                 ctx.arrival,
-                None,
+                usd,
                 rt.catalog,
                 history,
                 total,
@@ -121,12 +143,15 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
             )
             decision = decide(case_file, rt.agents)
         new = ledger.Arrival(
-            source, rt.now(), ingested, all_findings, decision, ctx.arrival.amount_due
+            source, rt.now(), ingested, all_findings, decision, ctx.arrival.amount_due, usd
         )
         with _stage(source, "ledger"):
-            if identity is None:  # Partial/Incomplete Identity: nothing to version-check
+            if replacing is not None:
+                arrival_id = ledger.replace_if_unchanged(conn, *replacing, identity, version, new)
+            elif identity is None:  # Partial/Incomplete Identity: nothing to version-check
                 return ledger.record(conn, new)
-            arrival_id = ledger.record_if_unchanged(conn, identity, version, new)
+            else:
+                arrival_id = ledger.record_if_unchanged(conn, identity, version, new)
         if arrival_id is not None:
             return arrival_id
         if attempt < MAX_DECIDE_ATTEMPTS:
@@ -154,20 +179,29 @@ class ArrivalResult:
     model_notes: str  # "offline tier", a role name, or "none" (no model role ran)
 
 
+def _model_notes(record: dict) -> str:
+    """Which model roles touched the decision, derived only from the persisted record."""
+    decision = record["decision"]
+    notes = []
+    if record.get("extraction") is not None:
+        notes.append("extraction")
+    if decision.get("critic") is not None:
+        notes.append("critic")  # also when every attempt failed
+    elif decision.get("unreviewed_warnings"):
+        notes.append("offline tier")  # row 5 without a critic: no online role ever ran
+    else:
+        for role in ("escalate_review", "advisory"):
+            if call := decision.get(role):
+                notes.append("offline tier" if call["tier"] == "offline" else role)
+                break
+    return ", ".join(notes) or "none"
+
+
 def arrival_result(conn, arrival_id: int) -> ArrivalResult:
     row = conn.execute("SELECT * FROM arrivals WHERE id = ?", (arrival_id,)).fetchone()
     record = json.loads(row["record"])
     decision = record["decision"]
-    notes = "none"
-    if decision.get("critic") is not None:
-        notes = "critic"
-    else:
-        for role in ("escalate_review", "advisory"):
-            if call := decision.get(role):
-                notes = "offline tier" if call["tier"] == "offline" else role
-                break
-    if notes == "none" and record.get("extraction"):  # lowest precedence; full call in record
-        notes = "extraction"
+    notes = _model_notes(record)
     return ArrivalResult(
         arrival_id=arrival_id,
         source=row["source"],
@@ -180,6 +214,15 @@ def arrival_result(conn, arrival_id: int) -> ArrivalResult:
         reasons=decision["reasons"],
         model_notes=notes,
     )
+
+
+def _paid_if_claimed(conn, arrival_id: int, rt: Runtime, source: str) -> ArrivalResult:
+    """Pay an arrival its Decision just claimed (Approved -> Payment Pending), exactly once."""
+    result = arrival_result(conn, arrival_id)
+    if result.state == "payment_pending":
+        pay_claimed(conn, arrival_id, rt, source)
+        result = arrival_result(conn, arrival_id)
+    return result
 
 
 def pay_claimed(conn, arrival_id: int, rt: Runtime, source: str) -> None:
@@ -204,8 +247,8 @@ _REJECT_ONLY = {
 }
 
 
-def _refusal(row, action: str) -> str | None:
-    """Why this Resolution must be refused, or None when it may proceed."""
+def _state_refusal(row) -> str | None:
+    """Why no reviewer action applies to this arrival in its state, or None."""
     refused_by_state = {
         "payment_pending": "payment pending: v1 has no settlement action, check the bank outside",
         "superseded": f"replaced by its later arrival #{row['superseded_by']}; it needs no action",
@@ -219,6 +262,13 @@ def _refusal(row, action: str) -> str | None:
         return f"arrival #{row['id']} is {refused_by_state[row['state']]}"
     if row["resolution"]:
         return f"arrival #{row['id']} already has a Resolution ({row['resolution']})"
+    return None
+
+
+def _refusal(row, action: str) -> str | None:
+    """Why this Resolution must be refused, or None when it may proceed."""
+    if why := _state_refusal(row):
+        return why
     if action == "reject":
         return None
     codes = {FindingCode(f["code"]) for f in json.loads(row["record"])["findings"]}
@@ -277,6 +327,110 @@ def resolve(rt: Runtime, arrival_id: int, action: str, reason: str) -> ArrivalRe
         conn.close()
 
 
+class RetryRefused(Exception):
+    """A retry was refused, or could not complete; the arrival is unchanged."""
+
+
+def _failed_model_call(record: dict) -> str | None:
+    """The model role whose failed or unavailable call left this arrival undecided, or None.
+
+    Extraction and the escalate-only review count only when an online call got no usable
+    answer; Unreviewed Warnings (row 5) is by definition no usable Critic answer, offline too.
+    """
+    extraction, decision = record.get("extraction"), record["decision"]
+    if extraction and extraction["call"]["answer"] is None:
+        return "extraction"
+    if decision.get("unreviewed_warnings"):
+        return "critic"
+    escalate = decision.get("escalate_review")
+    if (
+        decision["decided_by"] == "rule_engine"
+        and escalate
+        and escalate["tier"] != "offline"
+        and escalate["answer"] is None
+    ):
+        return "escalate_review"
+    return None
+
+
+def _retry_refusal(row, online: bool) -> str | None:
+    """Why a retry must be refused, or None when it may run (the fail-closed retry gate)."""
+    arrival = f"arrival #{row['id']}"
+    if not online:
+        return f"offline tier: a retry of {arrival} would make no model call, so nothing changes"
+    if why := _state_refusal(row):
+        return why
+    record = json.loads(row["record"])
+    if record["invoice"] is None:
+        return f"{arrival} is an unreadable document: no model call can change that"
+    if _failed_model_call(record) is not None:
+        return None
+    decision = record["decision"]
+    if decision["decided_by"] == "llm_critic" or decision.get("critic") is not None:
+        return f"{arrival} has a definitive model verdict; a reviewer resolves it"
+    return (
+        f"{arrival} was decided by the rules (row {decision['precedence_row']}), not by a "
+        "failed model call; a retry cannot change it"
+    )
+
+
+def _stored_ingested(record: dict, rerun_extraction: bool) -> Ingested:
+    """The Ingested a readable arrival was decided from, rebuilt from its stored record.
+
+    Ingestion raises no Finding for a readable invoice; only the Extraction Fallback adds one
+    (LLM_EXTRACTED). Validation and Ledger Findings are derived again when deciding.
+    """
+    extraction = record.get("extraction")
+    return Ingested(
+        invoice=Invoice.model_validate(record["invoice"]),
+        findings=[
+            Finding.model_validate(f)
+            for f in record["findings"]
+            if f["code"] == FindingCode.LLM_EXTRACTED
+        ],
+        repairs=record["repairs"],
+        raw_text=record["raw_text"],
+        missing_required=extraction["requested"] if extraction else [],
+        extraction=None
+        if extraction is None or rerun_extraction
+        else RoleCall.model_validate(extraction["call"]),
+    )
+
+
+def retry(rt: Runtime, arrival_id: int) -> ArrivalResult:
+    """Decide one Needs Review arrival again after its model call failed (online tier only).
+
+    The SAME arrival goes through `record_arrival` again, so every rule, Critic Bound,
+    guardrail and the payment cap apply unchanged, and its Decision is replaced in place (no
+    new arrival). An Approved retry is claimed and paid exactly once; one that fails again
+    stays Needs Review. A refusal or failure leaves the arrival unchanged.
+    """
+    conn = ledger.connect(rt.ledger_path)
+    try:
+        row = conn.execute("SELECT * FROM arrivals WHERE id = ?", (arrival_id,)).fetchone()
+        if row is None:
+            raise RetryRefused(f"no arrival #{arrival_id}")
+        if why := _retry_refusal(row, online=rt.tier != "offline"):
+            raise RetryRefused(why)
+        record, source = json.loads(row["record"]), row["source"]
+        rt = _bind_events(rt, source)
+        extraction_failed = _failed_model_call(record) == "extraction"
+        try:
+            ingested = _stored_ingested(record, rerun_extraction=extraction_failed)
+            if extraction_failed:
+                ingested = _maybe_extract(ingested, source, rt)
+            record_arrival(conn, ingested, source, rt, replacing=(arrival_id, row["seq"]))
+        except ProcessingFailure as exc:
+            raise RetryRefused(
+                f"retry of arrival #{arrival_id} did not complete ({exc.stage}: {exc.error}); "
+                "it is unchanged"
+            ) from exc
+        _notify(rt, Event("retried", source, {"arrival_id": arrival_id}))
+        return _paid_if_claimed(conn, arrival_id, rt, source)
+    finally:
+        conn.close()
+
+
 class BootstrapError(Exception):
     """The run cannot start: unsupported tier, or a database with the wrong schema."""
 
@@ -328,6 +482,32 @@ def collect_files(path: Path | str) -> list[Path]:
     return sorted(p for p in path.iterdir() if p.is_file()) if path.is_dir() else [path]
 
 
+@dataclass(frozen=True)
+class Discovery:
+    """The files a run over a local source would process, in processing order."""
+
+    paths: tuple[Path, ...]
+    types: dict[str, int]  # file type (suffix) -> count, in first-seen order
+    problem: str | None = None  # why nothing can run from this source
+
+
+def discover(source: Path | str) -> Discovery:
+    """What `collect_files` finds at a local folder (or file) path; never reads the files."""
+    if not str(source).strip():
+        return Discovery((), {}, "type a local folder path")
+    path = Path(source).expanduser()
+    if not path.exists():
+        return Discovery((), {}, f"not found: {source}")
+    try:
+        paths = tuple(collect_files(path))
+    except OSError as exc:
+        return Discovery((), {}, f"cannot read {source}: {exc.strerror or exc}")
+    if not paths:
+        return Discovery((), {}, f"no files in {source}")
+    types = Counter(p.suffix.lower().lstrip(".") or "no type" for p in paths)
+    return Discovery(paths, dict(types))
+
+
 def process_path(path: Path | str, rt: Runtime) -> BatchResult:
     """Ingest one file, then decide, record and (when Approved) pay each invoice in it
     independently; a failing invoice is reported and the rest of the file continues."""
@@ -361,10 +541,7 @@ def _process_one(conn, ingested: Ingested, source: str, rt: Runtime) -> ArrivalR
     _notify(
         rt, Event("decided", source, {"outcome": result.decision, "row": result.precedence_row})
     )
-    if result.state == "payment_pending":  # Approved and claimed
-        pay_claimed(conn, arrival_id, rt, source)
-        result = arrival_result(conn, arrival_id)
-    return result
+    return _paid_if_claimed(conn, arrival_id, rt, source)
 
 
 @dataclass(frozen=True)
@@ -406,11 +583,9 @@ def run_batch(paths: list[Path], rt: Runtime) -> BatchResult:
     return BatchResult(results, failed)
 
 
-def review_queue(ledger_path: Path) -> list[QueueItem]:
-    """The Review Queue: the same Ledger query every presenter uses.
-
-    Read-only: the Ledger must already exist and is never created, migrated or seeded.
-    """
+@contextmanager
+def _read_only(ledger_path: Path):
+    """An existing Ledger opened read-only; it is never created, migrated or seeded."""
     if not ledger_path.exists():
         raise BootstrapError(f"ledger not found: {ledger_path}")
     try:
@@ -418,6 +593,287 @@ def review_queue(ledger_path: Path) -> list[QueueItem]:
     except (ledger.LedgerError, sqlite3.Error) as exc:
         raise BootstrapError(str(exc)) from exc
     try:
-        return ledger.review_queue(conn)
+        yield conn
     finally:
         conn.close()
+
+
+def review_queue(ledger_path: Path) -> list[QueueItem]:
+    """The Review Queue: the same Ledger query every presenter uses (read-only)."""
+    with _read_only(ledger_path) as conn:
+        return ledger.review_queue(conn)
+
+
+# Results read models: what the reviewer TUI shows, built only from the stored Ledger record.
+# Presentation mapping only: no rule runs and no Decision is re-computed here.
+
+VIEWS = ("all", "approved", "needs_review", "rejected")
+# Ledger state -> Results view. "needs_review" is exactly the Review Queue (Needs Review and
+# Payment Pending), so its count matches `review --list`. Duplicate and Superseded arrivals are
+# not rejections (their invoice is already claimed or replaced), so only "all" shows them.
+_VIEW_OF_STATE = {
+    "paid": "approved",
+    "needs_review": "needs_review",
+    "payment_pending": "needs_review",
+    "logged_rejection": "rejected",
+}
+
+
+@dataclass(frozen=True)
+class ResultRow:
+    arrival_id: int
+    source: str
+    state: str
+    view: str | None  # None: shown only under "all"
+
+
+@dataclass(frozen=True)
+class Results:
+    rows: list[ResultRow]  # every arrival, in arrival order
+    files: int  # distinct source files
+    funnel: dict[str, int]  # ingest -> validate -> approve -> paid
+
+    def in_view(self, view: str) -> list[ResultRow]:
+        return [r for r in self.rows if view == "all" or r.view == view]
+
+    def count(self, view: str) -> int:
+        return len(self.in_view(view))
+
+
+def results(ledger_path: Path) -> Results:
+    """Every arrival with its view, plus the batch funnel (read-only)."""
+    with _read_only(ledger_path) as conn:
+        rows = conn.execute(
+            "SELECT id, source, state, json_extract(record, '$.invoice') IS NOT NULL AS readable"
+            " FROM arrivals ORDER BY id"
+        ).fetchall()
+    funnel = {
+        "ingest": len(rows),
+        "validate": sum(r["readable"] for r in rows),  # validation ran on a readable invoice
+        "approve": sum(r["state"] in ("paid", "payment_pending") for r in rows),  # claimed
+        "paid": sum(r["state"] == "paid" for r in rows),
+    }
+    return Results(
+        rows=[
+            ResultRow(r["id"], r["source"], r["state"], _VIEW_OF_STATE.get(r["state"]))
+            for r in rows
+        ],
+        files=len({r["source"] for r in rows}),
+        funnel=funnel,
+    )
+
+
+@dataclass(frozen=True)
+class Stage:
+    name: str  # ingestion, validation, approval, payment
+    status: str  # ok, warn, fail, held, logged, skipped
+    summary: str
+
+
+@dataclass(frozen=True)
+class Note:
+    role: str
+    text: str
+    model: bool  # the text is a model's output (or its failure), not a rule's or a person's
+
+
+@dataclass(frozen=True)
+class UsdEvidence:
+    total: Decimal
+    currency: str
+    amount: Decimal  # buffered USD Equivalent
+    rate: Decimal  # USD per unit of `currency`
+    as_of: date
+    buffer_pct: int
+
+
+@dataclass(frozen=True)
+class ArrivalDetail:
+    arrival_id: int
+    source: str
+    state: str
+    view: str | None
+    scrutiny: str  # standard or heightened
+    stages: list[Stage]
+    notes: list[Note]
+    finding_codes: list[str]  # unique, in recorded order
+    usd: UsdEvidence | None
+    actions: tuple[str, ...]  # reviewer actions it allows now: approve, reject, retry
+
+
+def arrival_detail(ledger_path: Path, arrival_id: int, *, online: bool = False) -> ArrivalDetail:
+    """One arrival as the Results detail pane shows it (read-only).
+
+    `actions` applies the same refusals `resolve` and `retry` enforce; `online` is whether the
+    presenter's runtime can call a model (retry is never offered offline).
+    """
+    with _read_only(ledger_path) as conn:
+        row = conn.execute("SELECT * FROM arrivals WHERE id = ?", (arrival_id,)).fetchone()
+    if row is None:
+        raise LookupError(f"no arrival #{arrival_id}")
+    record = json.loads(row["record"])
+    decision = Decision.model_validate(record["decision"])
+    findings = [Finding.model_validate(f) for f in record["findings"]]
+    heightened = any(r.startswith("HEIGHTENED_SCRUTINY") for r in decision.reasons)
+    return ArrivalDetail(
+        arrival_id=arrival_id,
+        source=row["source"],
+        state=row["state"],
+        view=_VIEW_OF_STATE.get(row["state"]),
+        scrutiny="heightened" if heightened else "standard",
+        stages=[
+            _ingestion_stage(record),
+            _validation_stage(record, findings),
+            _approval_stage(decision),
+            _payment_stage(row),
+        ],
+        notes=_notes(record, decision, row),
+        finding_codes=list(dict.fromkeys(f.code.value for f in findings)),
+        usd=_usd_evidence(row, record),
+        actions=tuple(
+            action
+            for action, refusal in (
+                ("approve", _refusal(row, "approve")),
+                ("reject", _refusal(row, "reject")),
+                ("retry", _retry_refusal(row, online)),
+            )
+            if refusal is None
+        ),
+    )
+
+
+def _ingestion_stage(record: dict) -> Stage:
+    if record["invoice"] is None:
+        return Stage("ingestion", "fail", f"unreadable: {record['unreadable_reason']}")
+    if (extracted := record.get("extraction")) is not None:
+        supplied = ", ".join(extracted["supplied"]) or "nothing"
+        return Stage("ingestion", "warn", f"model extracted {supplied}")
+    if record["repairs"]:
+        return Stage(
+            "ingestion", "warn", "repaired " + ", ".join(r["field"] for r in record["repairs"])
+        )
+    return Stage("ingestion", "ok", f"parsed {record['invoice']['source_format']}")
+
+
+def _validation_stage(record: dict, findings: list[Finding]) -> Stage:
+    if record["invoice"] is None:
+        return Stage("validation", "skipped", "not run: unreadable document")
+    if not findings:
+        return Stage("validation", "ok", "no findings")
+    status = "fail" if any(f.severity is Severity.REJECTION_RULE for f in findings) else "warn"
+    return Stage("validation", status, ", ".join(dict.fromkeys(f.code.value for f in findings)))
+
+
+_APPROVAL_STATUS = {
+    "approved": "ok",
+    "needs_review": "warn",
+    "rejected": "fail",
+    "duplicate": "fail",
+}
+
+
+def _approval_stage(decision: Decision) -> Stage:
+    outcome, by = decision.outcome.value.replace("_", " "), decision.decided_by.replace("_", " ")
+    summary = f"{outcome} by {by}, row {decision.precedence_row}"
+    return Stage("approval", _APPROVAL_STATUS[decision.outcome.value], summary)
+
+
+def _payment_stage(row) -> Stage:
+    match row["state"]:
+        case "paid":
+            return Stage("payment", "ok", f"paid {row['amount_paid']} {row['currency']}")
+        case "payment_pending":
+            issue = PaymentIssue.model_validate_json(row["payment_issue"])
+            return Stage("payment", "warn", f"pending: {issue.what}")
+        case "needs_review":
+            return Stage("payment", "held", "held for review")
+        case "logged_rejection":
+            by_reviewer = row["resolution"] == "reject"
+            return Stage(
+                "payment", "logged", "rejected by reviewer" if by_reviewer else "rejection logged"
+            )
+        case "duplicate":
+            return Stage("payment", "logged", f"not paid: duplicate of #{row['duplicate_of']}")
+        case _:  # superseded
+            return Stage("payment", "logged", f"not paid: superseded by #{row['superseded_by']}")
+
+
+def _notes(record: dict, decision: Decision, row) -> list[Note]:
+    """Who said what about this arrival: rules, model roles (labeled), and the reviewer."""
+    notes = []
+    if (extracted := record.get("extraction")) is not None:
+        notes.append(_role_note(RoleCall.model_validate(extracted["call"])))
+    notes.append(Note("rule engine", "; ".join(decision.reasons), model=False))
+    if decision.bound_failures:
+        notes.append(Note("critic bound", "; ".join(decision.bound_failures), model=False))
+    for attempt in decision.critic.attempts if decision.critic else []:
+        notes.extend(_attempt_notes(attempt))
+    for call in (decision.escalate_review, decision.advisory):
+        if call is not None:
+            notes.append(_role_note(call))
+    if row["resolution"]:
+        text = f"{row['resolution']}: {row['resolution_reason']}"
+        notes.append(Note("reviewer", text, model=False))
+    return notes
+
+
+def _role_note(call: RoleCall) -> Note:
+    role = call.role.replace("_", "-")
+    if call.tier == "offline":
+        return Note(role, f"{call.error or 'offline tier'}: no model call made", model=False)
+    if call.answer is None:
+        return Note(role, f"no usable answer: {call.error}", model=True)
+    if call.role == "extraction":
+        return Note(role, "answered " + ", ".join(sorted(call.answer)), model=True)
+    rationale, verdict = call.answer.get("rationale", ""), call.answer.get("verdict")
+    return Note(role, f"{verdict}: {rationale}" if verdict else rationale, model=True)
+
+
+def _attempt_notes(attempt: CriticAttempt) -> list[Note]:
+    n, assessor, verifier = attempt.attempt, attempt.assessor, attempt.verifier
+    notes = []
+    if assessor.assessments:
+        text = "; ".join(
+            f"{_where(a.code, a.line)} {'explained' if a.explained else 'unexplained'}: "
+            f"{a.rationale}"
+            for a in assessor.assessments
+        )
+    else:
+        text = f"no usable answer: {assessor.error}"
+    notes.append(Note(f"assessor #{n}", text, model=True))
+    if assessor.failures:  # the evidence guardrail is a rule, not the model
+        text = "; ".join(f"{f.where}: {f.message}" for f in assessor.failures)
+        notes.append(Note(f"guardrail #{n}", text, model=False))
+    if verifier is not None:
+        if verifier.checks:
+            text = "; ".join(
+                f"{_where(c.code, c.line)} {'holds' if c.holds else 'does not hold'}: {c.rationale}"
+                for c in verifier.checks
+            )
+        else:
+            text = f"no usable answer: {verifier.error}"
+        notes.append(Note(f"verifier #{n}", text, model=True))
+    return notes
+
+
+def _where(code: FindingCode, line: int | None) -> str:
+    return code.value if line is None else f"{code.value} line {line}"
+
+
+def _usd_evidence(row, record: dict) -> UsdEvidence | None:
+    """The USD Equivalent persisted with the decision, read back as stored (never recomputed).
+
+    None for a USD invoice (at par, nothing to show), a currency without a Reference Rate, and
+    records written before the field existed.
+    """
+    usd = record.get("usd_equivalent")
+    if usd is None or usd["currency"] == "USD":
+        return None
+    return UsdEvidence(
+        total=Decimal(row["total"]),
+        currency=usd["currency"],
+        amount=Decimal(usd["amount"]),
+        rate=Decimal(usd["rate"]),
+        as_of=date.fromisoformat(usd["as_of"]),
+        buffer_pct=int(Decimal(usd["buffer"]) * 100),
+    )
