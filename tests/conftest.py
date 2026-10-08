@@ -3,14 +3,16 @@
 import builtins
 import contextlib
 import io
+import json
 import os
 import socket
 from decimal import Decimal
 
 import pytest
 
+from invoice_pipeline import service
 from invoice_pipeline.catalog import Catalog
-from invoice_pipeline.critic import build_case_file
+from invoice_pipeline.critic import build_case_file, online_agents
 from invoice_pipeline.model import ArrivalSummary, Invoice, LineItem
 from invoice_pipeline.validation import validate
 
@@ -185,8 +187,44 @@ def make_case(catalog):
 
 
 def concur(evidence=("invoice.vendor",), verdict="concur", rationale="nothing needs a human"):
-    import json
-
     return text_reply(
         json.dumps({"verdict": verdict, "evidence": list(evidence), "rationale": rationale})
     )
+
+
+class Harness:
+    """A real Runtime over tmp files: online roles scripted, bank and events recorded."""
+
+    def __init__(self, tmp_path, grok, *replies, tier="grok"):
+        from invoice_pipeline import catalog
+
+        self.tmp_path = tmp_path
+        self.inventory, self.ledger_path = tmp_path / "inventory.db", tmp_path / "ledger.db"
+        catalog.seed(self.inventory)
+        self.chat = ScriptedChat(*replies)
+        self.events, self.paid = [], []
+        agents = online_agents(
+            grok, service.tool_factory(self.inventory, self.ledger_path), chat_fn=self.chat
+        )
+        self.rt = service.Runtime(
+            catalog=catalog.load_catalog(self.inventory),
+            ledger_path=self.ledger_path,
+            tier=tier,
+            agents=agents,
+            pay_fn=lambda *args: self.paid.append(args) or {"status": "success"},
+            on_event=self.events.append,
+        )
+
+    def write(self, name, content):
+        path = self.tmp_path / name
+        path.write_text(content if isinstance(content, str) else json.dumps(content))
+        return path
+
+    def process(self, name, content):
+        batch = service.process_path(self.write(name, content), self.rt)
+        assert not batch.failed, [str(f) for f in batch.failed]
+        return batch.results[0]
+
+    @property
+    def names(self):
+        return [e.name for e in self.events]
