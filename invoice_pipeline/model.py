@@ -169,7 +169,7 @@ class References(BaseModel):
     aggregated_quantities: dict[str, Decimal]  # valid quantities per invoiced SKU
     price_tolerance: Decimal
     price_deviations: dict[int, Decimal]  # line index -> |unit - ref| / ref (0.20 = 20%)
-    usd_equivalent: UsdEquivalent | None  # empty until Reference Rates exist (slice 3)
+    usd_equivalent: UsdEquivalent | None  # None without a total or a Reference Rate
     heightened_scrutiny_line: Decimal
 
 

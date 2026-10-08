@@ -21,6 +21,7 @@ from invoice_pipeline.catalog import Catalog, CatalogError
 from invoice_pipeline.critic import build_case_file, offline_agents, online_agents
 from invoice_pipeline.llm import ConfigError, select_tier
 from invoice_pipeline.model import Agents, Event, FindingCode, Ingested, QueueItem, vendor_key
+from invoice_pipeline.rates import usd_equivalent
 from invoice_pipeline.tools import ToolRunner, open_readonly
 from invoice_pipeline.validation import validate
 
@@ -100,6 +101,8 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
     invoice = ingested.invoice
     with _stage(source, "validation"):
         findings = [*ingested.findings, *validate(invoice, rt.catalog)]
+    # classification only: the Reviewer and Heightened Scrutiny read it; payment never does
+    usd = usd_equivalent(invoice.total, invoice.currency) if invoice.total is not None else None
     _notify(rt, Event("validated", source, {"findings": [f.code.value for f in findings]}))
     identity, key = invoice.identity(), vendor_key(invoice.vendor)
     for attempt in range(1, MAX_DECIDE_ATTEMPTS + 1):
@@ -113,7 +116,7 @@ def record_arrival(conn, ingested: Ingested, source: str, rt: Runtime) -> int:
                 invoice,
                 all_findings,
                 ctx.arrival,
-                None,
+                usd,
                 rt.catalog,
                 history,
                 total,
