@@ -183,3 +183,58 @@ ReasonScreen {
     border-title-color: #A59E8F;
     scrollbar-size-vertical: 1;
 }
+
+#run-row {
+    height: 1;
+    margin-top: 2;
+}
+
+#run-row #run {
+    min-width: 0;
+    height: 1;
+    padding: 0 1;
+    border: none;
+    background: #8DBD79;
+    color: #141411;
+    text-style: bold;
+}
+
+#run-stages {
+    width: 1fr;
+    margin-left: 2;
+}
+
+/* Processing: overall progress (top), the run's files (left) and the agent log (right) */
+
+#processing {
+    height: 1fr;
+    margin: 1 2 0 2;
+}
+
+#progress {
+    height: auto;
+    padding: 0 1;
+    border: solid #3A382F;
+}
+
+#run-body {
+    height: 1fr;
+    margin-top: 1;
+}
+
+#run-files,
+#agent-log {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    background: #141411;
+    border: solid #3A382F;
+    border-title-color: #A59E8F;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #3A382F;
+    scrollbar-background: #141411;
+}
+
+#agent-log {
+    margin-left: 2;
+}

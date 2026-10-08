@@ -8,6 +8,7 @@ arrival allows comes from `ArrivalDetail.actions`. Needs the optional `tui` extr
 """
 
 import argparse
+import dataclasses
 from pathlib import Path
 
 from rich.box import SQUARE
@@ -24,6 +25,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, Input, OptionList, Static
 from textual.widgets.option_list import Option
+from textual.worker import get_current_worker
 
 from invoice_pipeline import service
 from invoice_pipeline.service import (
@@ -73,7 +75,7 @@ KEY_HINTS = (
     ("n", "new run"),
     ("q", "quit"),
 )
-NEW_RUN_HINTS = (("tab", "results"),)
+NEW_RUN_HINTS = (("enter", "run pipeline"), ("tab", "results"))
 DEFAULT_SOURCE = "data/invoices/"
 FUNNEL = ("ingest", "validate", "approve", "paid")
 ACTIONS = (  # (action, key, label, colour), in `ArrivalDetail.actions` order
@@ -340,9 +342,211 @@ class SourcePane(Vertical):
             Text("Local folder path. Reads pdf, txt, csv, json and xml.", MUTED), id="source-help"
         )
         yield Static(id="source-status")
+        with Horizontal(id="run-row"):
+            button = Button(Text("[enter] run pipeline"), id="run")
+            button.can_focus = False  # the source input keeps the keyboard
+            yield button
+            yield Static(Text("ingest → validate → approve → pay", SOFT), id="run-stages")
 
     def say(self, message: str | None, colour: str = TEXT) -> None:
         self.query_one("#source-status", Static).update(Text(message or "", colour))
+
+
+STAGES = ("ingestion", "validation", "approval", "payment")  # a file's in-flight stages
+ROLE_EVENTS = ("extract", "escalate", "advise", "assess", "verify", "correct")
+EVENT_STAGE = {  # pipeline event -> the stage it reports from (the agent log's first column)
+    "ingested": "ingestion",
+    "extract": "ingestion",
+    "validated": "validation",
+    **dict.fromkeys(("escalate", "advise", "assess", "verify", "correct"), "approval"),
+    "redecided": "approval",
+    "decided": "approval",
+    "payment_sent": "payment",
+    "payment_failed": "payment",
+}
+HANDS_OVER = {"ingested": "validation", "validated": "approval"}  # the stage an event starts
+FILE_STATE_ORDER = (  # a file holding several invoices shows the one that needs a person most
+    "needs_review",
+    "payment_pending",
+    "logged_rejection",
+    "paid",
+    "duplicate",
+    "superseded",
+)
+OUTCOME_COLOUR = {"approved": GREEN, "rejected": RED}
+BAR = 10  # cells of a file's mini progress bar
+PROCESSING_HINTS = (("…", "processing"), ("tab", "results"))
+
+
+@dataclasses.dataclass
+class FileProgress:
+    name: str
+    stage: str = "queued"  # "queued", one of STAGES, or "done"
+    states: tuple[str, ...] = ()  # Ledger states of the file's recorded invoices
+    failed: int = 0  # invoices (or the file) that failed processing
+
+    @property
+    def fraction(self) -> float:
+        if self.stage == "done":
+            return 1.0
+        if self.stage in STAGES:
+            return (STAGES.index(self.stage) + 1) / (len(STAGES) + 1)
+        return 0.0
+
+
+class RunProgress:
+    """What the Processing view shows, folded from a run's pipeline events on the UI thread.
+
+    Presentation only: the event names say which stage a file is in; every outcome comes from
+    the Ledger states the service reports once a file is done.
+    """
+
+    def __init__(self, source: str, names: list[str]):
+        self.source = source
+        self.files = {name: FileProgress(name) for name in names}
+        self.log: list[tuple[str, str, str]] = []  # (stage, message, colour), in arrival order
+        self.funnel = dict.fromkeys(FUNNEL, 0)
+
+    @property
+    def done(self) -> int:
+        return sum(f.stage == "done" for f in self.files.values())
+
+    @property
+    def fraction(self) -> float:
+        return sum(f.fraction for f in self.files.values()) / max(len(self.files), 1)
+
+    def started(self, name: str) -> None:
+        self.files[name].stage = STAGES[0]
+
+    def event(self, name: str, file: str, detail: dict) -> None:
+        self.log.append(_log_line(name, file, detail))
+        counted = {"ingested": "ingest", "validated": "validate", "payment_sent": "paid"}
+        if name in counted:
+            self.funnel[counted[name]] += 1
+        if name == "decided" and detail.get("outcome") == "approved":
+            self.funnel["approve"] += 1
+        row = self.files.get(file)
+        if row is None or row.stage not in STAGES:
+            return
+        stage = HANDS_OVER.get(name, EVENT_STAGE.get(name, row.stage))
+        if name == "ingested" and detail.get("unreadable"):
+            stage = "approval"  # nothing to validate: the unreadable file goes straight on
+        if name == "decided":
+            stage = "payment" if detail.get("outcome") == "approved" else "approval"
+        if STAGES.index(stage) > STAGES.index(row.stage):  # stages only move forward
+            row.stage = stage
+
+    def finished(self, name: str, states: tuple[str, ...], failed: int) -> None:
+        row = self.files[name]
+        row.stage, row.states, row.failed = "done", states, failed
+
+
+def _log_line(name: str, file: str, detail: dict) -> tuple[str, str, str]:
+    """One agent log line: (stage, message, colour) for a pipeline event."""
+    stage = EVENT_STAGE.get(name, detail.get("stage", "pipeline"))
+    colour = TEXT
+    if name == "ingested":
+        message, colour = ("unreadable", AMBER) if detail.get("unreadable") else ("parsed", TEXT)
+    elif name == "validated":
+        found = len(detail.get("findings", ()))
+        message = "checked against inventory"
+        if found:
+            message += f" · {found} finding{'s' if found > 1 else ''}"
+    elif name == "extract":
+        message, colour = f"extract → {', '.join(detail.get('fields', ()))}", SOFT
+    elif name in ROLE_EVENTS:
+        message, colour = f"{name} · attempt {detail.get('attempt', 1)}", SOFT
+    elif name == "redecided":
+        message, colour = "identity changed while deciding: deciding again", AMBER
+    elif name == "decided":
+        outcome = str(detail.get("outcome", ""))
+        message = f"decision → {outcome.replace('_', ' ')}"
+        colour = OUTCOME_COLOUR.get(outcome, AMBER)
+    elif name == "payment_sent":
+        message, colour = "payment sent", GREEN
+    elif name == "payment_failed":
+        message, colour = "payment failed: the claim stays for a person", RED
+    elif name == "file_failed":
+        message, colour = f"failed at {detail.get('stage')}: {detail.get('error')}", RED
+    else:
+        message, colour = name.replace("_", " "), SOFT
+    return stage, f"{file} {message}", colour
+
+
+def _bar(fraction: float, width: int, colour: str, rest: str = RULE) -> Text:
+    filled = round(fraction * width)
+    return Text.assemble(("█" * filled, colour), ("░" * (width - filled), rest))
+
+
+def _file_mark(row: FileProgress) -> tuple[str, str, str]:
+    """(glyph, colour, stage label) for a file of the run."""
+    if row.stage == "queued":
+        return "·", MUTED, "queued"
+    if row.stage != "done":
+        return "⠿", TEXT, row.stage
+    if row.failed:
+        return "✗", RED, "failed"
+    state = next((s for s in FILE_STATE_ORDER if s in row.states), None)
+    if state is None:
+        return "·", SOFT, "done"
+    glyph, colour, badge = STATE_MARK[state]
+    return glyph, colour, badge.lower()
+
+
+class RunFiles(Static):
+    """The run's files: glyph, name, mini bar and the stage each is in."""
+
+    def show(self, progress: RunProgress) -> None:
+        table = Table.grid(expand=True, padding=(0, 1))
+        table.add_column(width=1)
+        table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+        table.add_column(width=BAR)
+        table.add_column(width=15, no_wrap=True)
+        for row in progress.files.values():
+            glyph, colour, label = _file_mark(row)
+            queued = row.stage == "queued"
+            done = row.stage == "done"
+            name = Text(row.name, MUTED if queued else TEXT)
+            bar = _bar(row.fraction, BAR, colour if done else TEXT)
+            label_colour = colour if done else MUTED if queued else TEXT  # in flight: light text
+            table.add_row(Text(glyph, colour), name, bar, Text(label, label_colour))
+        self.update(table)
+
+
+class AgentLog(VerticalScroll):
+    """`agent log`: one `stage  message` line per pipeline event, newest last."""
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="agent-log-body")
+
+    @property
+    def body(self) -> Static:
+        return self.query_one("#agent-log-body", Static)
+
+    def show(self, progress: RunProgress) -> None:
+        table = Table.grid(padding=(0, 2))
+        table.add_column(width=10, no_wrap=True)
+        table.add_column(ratio=1)
+        for stage, message, colour in progress.log:
+            table.add_row(Text(stage, MUTED), Text(message, colour))
+        self.body.update(table)
+        self.scroll_end(animate=False)
+
+
+def _progress_header(progress: RunProgress) -> Table:
+    """`processing <source>` with the overall bar and percentage, and `done/total done`."""
+    grid = Table.grid(expand=True)
+    grid.add_column()
+    grid.add_column(justify="right")
+    grid.add_row(
+        Text.assemble(("processing ", f"bold {AMBER}"), (progress.source, SOFT)),
+        Text(f"{progress.done}/{len(progress.files)} done", SOFT),
+    )
+    grid.add_row(
+        Text.assemble(_bar(progress.fraction, 40, GREEN), (f"  {progress.fraction:.0%}", TEXT)),
+        Text(),
+    )
+    return grid
 
 
 class FoundPane(VerticalScroll):
@@ -396,6 +600,8 @@ class InvoiceApp(App):
         self.runtime, self.bootstrap_args = runtime, bootstrap
         self.start, self.mode = start, start
         self.discovery: Discovery | None = None
+        self.progress: RunProgress | None = None
+        self.running = False  # a run worker is writing the Ledger: no reviewer action until it ends
         self.active_view = "all"
         self.results: Results | None = None
         self.retrying = False  # a retry worker is running: no other action until it ends
@@ -412,12 +618,20 @@ class InvoiceApp(App):
             with Horizontal(id="new_run"):
                 yield SourcePane(id="source-pane")
                 yield FoundPane(id="found")
+            with Vertical(id="processing"):
+                yield Static(id="progress")
+                with Horizontal(id="run-body"):
+                    with VerticalScroll(id="run-files"):
+                        yield RunFiles()
+                    yield AgentLog(id="agent-log")
         yield Static(_key_hints(), id="keys")
 
     def on_mount(self) -> None:
         self.query_one(FileList).border_title = "files"
         self.query_one(SourcePane).border_title = "new run · source"
         self.query_one(FoundPane).border_title = "found"
+        self.query_one("#run-files").border_title = "files"
+        self.query_one(AgentLog).border_title = "agent log"
         self.query_one(DetailPane).say(None)
         try:
             if self.runtime is None and self.bootstrap_args is not None:
@@ -429,23 +643,117 @@ class InvoiceApp(App):
         self._show_view("all")
         self._set_mode(self.start)
 
-    def _set_mode(self, mode: str) -> None:
-        """Show New run or the Results views, with their header, focus and keys."""
+    def _set_mode(self, mode: str, reload: bool = False) -> None:
+        """Show New run, Processing or the Results views, with their header, focus and keys.
+
+        `reload` re-reads the Results from the Ledger first (a run has written to it).
+        """
         self.mode = mode
         self.query_one(ContentSwitcher).current = mode
+        keys = self.query_one("#keys", Static)
         if mode == "new_run":
             source = self.query_one("#source", Input)
             self._discover(source.value)
-            self.query_one("#keys", Static).update(_hints(NEW_RUN_HINTS))
+            keys.update(_hints(NEW_RUN_HINTS))
             source.focus()
+        elif mode == "processing":
+            keys.update(_hints(PROCESSING_HINTS))
+            self.set_focus(None)
+            self._show_progress()
         else:
+            if reload:
+                self.results = service.results(self.ledger_path)
+                self._show_view(self.active_view)
             self.query_one(RunHeader).show(self.results)
             self._show_actions()
             self.query_one(FileList).focus()
 
     def action_new_run(self) -> None:
+        """New run; while a run is in progress, its Processing view."""
         if not isinstance(self.screen, ModalScreen):
-            self._set_mode("new_run")
+            self._set_mode("processing" if self.running else "new_run")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "source":
+            self._start_run()
+
+    def _start_run(self) -> None:
+        """Run the pipeline over the discovered files, unless nothing can run."""
+        pane = self.query_one(SourcePane)
+        if self.running:
+            return
+        if self.runtime is None:
+            pane.say("read-only session: no pipeline runtime to run with", RED)
+            return
+        if self.discovery is None or self.discovery.problem:
+            pane.say(self.discovery.problem if self.discovery else "no source", AMBER)
+            return
+        pane.say(None)
+        self.running = True
+        self._show_processing(self.query_one("#source", Input).value.strip(), self.discovery)
+        self._run(self.discovery)
+
+    def _show_processing(self, source: str, discovery: Discovery) -> None:
+        self.progress = RunProgress(source, [path.name for path in discovery.paths])
+        self._set_mode("processing")
+
+    @work(thread=True, exclusive=True, group="run")
+    def _run(self, discovery: Discovery) -> None:
+        """Run the batch in a worker thread so the UI never blocks.
+
+        The worker gets its own Runtime copy whose observer hands every pipeline event to the UI
+        thread; the service opens the worker's own Ledger connections (SQLite objects are
+        thread-bound). Files run one by one so the view knows when each starts and ends.
+        """
+        worker = get_current_worker()
+
+        def relay(event) -> None:
+            self.call_from_thread(self._pipeline_event, event.name, event.file, dict(event.detail))
+
+        rt = dataclasses.replace(self.runtime, on_event=relay)
+        error = None
+        try:
+            for path in discovery.paths:
+                if worker.is_cancelled:
+                    return
+                self.call_from_thread(self._file_started, path.name)
+                batch = service.run_batch([path], rt)
+                states = tuple(result.state for result in batch.results)
+                self.call_from_thread(self._file_done, path.name, states, len(batch.failed))
+        except Exception as exc:  # shown, never a crash
+            error = f"run stopped: {exc}"
+        if not worker.is_cancelled:
+            self.call_from_thread(self._run_finished, error)
+
+    def _file_started(self, name: str) -> None:
+        self.progress.started(name)
+        self._show_progress()
+
+    def _pipeline_event(self, name: str, file: str, detail: dict) -> None:
+        self.progress.event(name, file, detail)
+        self._show_progress()
+
+    def _file_done(self, name: str, states: tuple[str, ...], failed: int) -> None:
+        self.progress.finished(name, states, failed)
+        self._show_progress()
+
+    def _show_progress(self) -> None:
+        progress = self.progress
+        self.query_one("#progress", Static).update(_progress_header(progress))
+        self.query_one(RunFiles).show(progress)
+        self.query_one(AgentLog).show(progress)
+        if self.mode == "processing":
+            self.query_one(RunHeader).funnel(len(progress.files), progress.funnel, AMBER)
+
+    def _run_finished(self, error: str | None) -> None:
+        """Land on the Results of the same Ledger, all view, with the run's outcome."""
+        self.running = False
+        self.active_view = "all"
+        self.keep_status = True
+        self._set_mode("results", reload=True)
+        failed = sum(f.failed for f in self.progress.files.values())
+        message = f"run finished · {len(self.progress.files)} files · {failed} failed"
+        self.query_one(DetailPane).say(error or message, RED if error or failed else GREEN)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "source":
@@ -460,15 +768,15 @@ class InvoiceApp(App):
     def action_cycle_view(self, step: int) -> None:
         if isinstance(self.screen, ModalScreen):  # tab is a priority key: not under a dialog
             return
-        if self.mode != "results":  # tab leaves New run for the view shown last
-            self._set_mode("results")
+        if self.mode != "results":  # tab leaves New run or Processing for the view shown last
+            self._set_mode("results", reload=self.progress is not None)
             return
         index = service.VIEWS.index(self.active_view)
         self._show_view(service.VIEWS[(index + step) % len(service.VIEWS)])
 
     def action_jump_view(self, index: int) -> None:
         if self.mode != "results":
-            self._set_mode("results")
+            self._set_mode("results", reload=self.progress is not None)
         self._show_view(service.VIEWS[index])
 
     def _show_view(self, view: str, keep: int | None = None) -> None:
@@ -500,7 +808,8 @@ class InvoiceApp(App):
 
     def _available(self) -> tuple[str, ...]:
         detail = self.query_one(DetailPane).detail
-        if self.runtime is None or detail is None or self.retrying or self.mode != "results":
+        busy = self.retrying or self.running or self.mode != "results"
+        if self.runtime is None or detail is None or busy:
             return ()
         return detail.actions
 
@@ -511,7 +820,10 @@ class InvoiceApp(App):
             self.query_one("#keys", Static).update(_key_hints(available))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.action_act(event.button.id)
+        if event.button.id == "run":
+            self._start_run()
+        else:
+            self.action_act(event.button.id)
 
     def action_act(self, action: str) -> None:
         """Start an action the selected arrival allows; anything else is ignored."""
