@@ -293,6 +293,17 @@ _STATE = {
 }
 
 
+def _extraction_audit(ingested) -> dict | None:
+    """The Extraction Fallback audit: what was asked, what was supplied, and the call itself."""
+    if ingested.extraction is None:
+        return None
+    return {
+        "requested": ingested.missing_required,
+        "supplied": ingested.invoice.extracted_fields if ingested.invoice else [],
+        "call": ingested.extraction,
+    }
+
+
 def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
     invoice, decision = new.ingested.invoice, new.decision
     record = {
@@ -301,6 +312,8 @@ def _insert(conn: sqlite3.Connection, new: Arrival) -> int:
         "repairs": new.ingested.repairs,
         "unreadable_reason": new.ingested.unreadable_reason,
         "decision": decision,
+        "raw_text": new.ingested.raw_text,
+        "extraction": _extraction_audit(new.ingested),
     }
     cols = dict(
         arrived_at=new.arrived_at.isoformat(),
