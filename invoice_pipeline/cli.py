@@ -19,9 +19,7 @@ EXIT_OK, EXIT_FAILED, EXIT_USAGE = 0, 1, 2  # usage = argparse's own code
 
 
 def _global_flags(parser: argparse.ArgumentParser, default=None) -> None:
-    parser.add_argument(
-        "--llm", choices=["grok", "ollama", "offline"], default=default, help="LLM tier"
-    )
+    parser.add_argument("--llm", choices=["grok", "offline"], default=default, help="LLM tier")
     parser.add_argument("--ledger", default=default, help="Ledger database (default: ledger.db)")
     parser.add_argument(
         "--inventory", default=default, help="inventory database (default: inventory.db)"

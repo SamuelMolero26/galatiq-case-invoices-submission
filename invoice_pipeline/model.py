@@ -6,7 +6,8 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, BeforeValidator
+
+from pydantic import BaseModel, BeforeValidator, StrictBool
 
 
 class Severity(StrEnum):
@@ -218,6 +219,33 @@ class Try(BaseModel):
     correction: str | None = None  # corrective message sent after this try failed
 
 
+class ToolCall(BaseModel):
+    """One Assessor tool call, numbered across the invoice (both attempts, all tries)."""
+
+    index: int
+    attempt: int  # 1, or 2 for the correction round
+    name: str
+    arguments: dict[str, Any]
+    result: dict[str, Any] | None  # None when the call failed
+    error: str | None  # unknown tool, bad arguments, raised, over budget
+    called_at: dt.datetime
+    elapsed_ms: int | None
+
+
+class WarningAssessment(BaseModel, frozen=True):
+    """One assessed Warning, in the strict shape settled by gate 2.5.
+
+    The Assessor returns one per `(code, line)`; the 2.11 evidence guardrail
+    reads exactly these fields. No coercion: `explained` is strict.
+    """
+
+    code: FindingCode
+    line: int | None
+    explained: StrictBool
+    evidence: list[str]
+    rationale: str
+
+
 class RoleCall(BaseModel):
     """Audit record of a single-call role (escalate-only, advisory, extraction)."""
 
@@ -252,11 +280,15 @@ class Decision(BaseModel):
 class Agents:
     """Model roles injected into `approval.decide`; scripted fakes in tests.
 
-    Slice 1 supplies offline callables.
+    Slice 1 supplies offline callables. Callable signatures are tightened when the
+    full-gate contracts arrive (assess/verify), without changing these fields.
     """
 
+    assess: Callable[..., Any]
+    verify: Callable[..., Any]
     escalate_review: Callable[[CaseFile], RoleCall]
     advise: Callable[[CaseFile, Decision], RoleCall]
+    on_step: Callable[[str, dict], None] = field(default=lambda event, detail: None)
 
 
 class PaymentIssue(BaseModel):
