@@ -729,16 +729,26 @@ class InvoiceApp(App):
         def relay(event) -> None:
             self.call_from_thread(self._pipeline_event, event.name, event.file, dict(event.detail))
 
+        def started(name: str) -> None:
+            if worker.is_cancelled:
+                raise RuntimeError("run cancelled")  # ends this lane; the run is being replaced
+            self.call_from_thread(self._file_started, name)
+
+        def done(name: str, batch) -> None:
+            states = tuple(result.state for result in batch.results)
+            if not worker.is_cancelled:
+                self.call_from_thread(self._file_done, name, states, len(batch.failed))
+
         rt = dataclasses.replace(self.runtime, on_event=relay)
         error = None
         try:
-            for path in discovery.paths:
-                if worker.is_cancelled:
-                    return
-                self.call_from_thread(self._file_started, path.name)
-                batch = service.run_batch([path], rt)
-                states = tuple(result.state for result in batch.results)
-                self.call_from_thread(self._file_done, path.name, states, len(batch.failed))
+            service.run_batch(
+                list(discovery.paths),
+                rt,
+                workers=service.default_workers(),
+                on_start=started,
+                on_done=done,
+            )
         except Exception as exc:  # shown, never a crash
             error = f"run stopped: {exc}"
         if not worker.is_cancelled:

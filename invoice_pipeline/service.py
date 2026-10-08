@@ -9,6 +9,7 @@ import os
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
@@ -40,6 +41,7 @@ from invoice_pipeline.tools import ToolRunner, open_readonly
 from invoice_pipeline.validation import validate
 
 MAX_DECIDE_ATTEMPTS = 3  # read-decide-write rounds before a processing failure
+DEFAULT_WORKERS = 4  # files in flight at once; the model round trips dominate a file's time
 
 log = logging.getLogger(__name__)
 
@@ -508,16 +510,18 @@ def discover(source: Path | str) -> Discovery:
     return Discovery(paths, dict(types))
 
 
-def process_path(path: Path | str, rt: Runtime) -> "BatchResult":
-    """Ingest one file, then decide, record and (when Approved) pay each invoice in it
-    independently; a failing invoice is reported and the rest of the file continues."""
+def process_path(
+    path: Path | str, rt: Runtime, ingested: list[Ingested] | None = None
+) -> "BatchResult":
+    """Ingest one file (unless already `ingested`), then decide, record and (when Approved) pay
+    each invoice in it independently; a failing invoice is reported and the rest continue."""
     path = Path(path)
     results, failed = [], []
     conn = ledger.connect(rt.ledger_path)
     try:
-        for ingested in ingestion.ingest(path):
+        for item in ingestion.ingest(path) if ingested is None else ingested:
             try:
-                results.append(_process_one(conn, ingested, path.name, rt))
+                results.append(_process_one(conn, item, path.name, rt))
             except Exception as exc:
                 failed.append(_failure(rt, path, exc))
     finally:
@@ -566,21 +570,78 @@ def _failure(rt: Runtime, path: Path, exc: Exception) -> ProcessingFailure:
     return failure
 
 
-def run_batch(paths: list[Path], rt: Runtime) -> BatchResult:
-    """Process files in the given order; a processing failure is reported and the rest continue.
+def default_workers() -> int:
+    """`INVOICE_WORKERS` when it is a positive integer, else DEFAULT_WORKERS."""
+    try:
+        return max(int(os.environ.get("INVOICE_WORKERS", "")), 0) or DEFAULT_WORKERS
+    except ValueError:
+        return DEFAULT_WORKERS
 
-    Every committed invoice is in `results`, also when another invoice of its file failed.
+
+def _run_file(path: Path, rt: Runtime, on_start, on_done, ingested=None) -> BatchResult:
+    if on_start:
+        on_start(path.name)
+    try:
+        batch = process_path(path, rt, ingested)
+    except Exception as exc:  # the file itself could not be processed (e.g. the Ledger)
+        batch = BatchResult([], [_failure(rt, path, exc)])
+    if on_done:
+        on_done(path.name, batch)
+    return batch
+
+
+def _lanes(ingested: list[list[Ingested]]) -> list[list[int]]:
+    """Group file indexes that must run one after another, each lane in file order.
+
+    Arrival order decides which of two files with one invoice identity is the original and which
+    the revision or duplicate, so they share a lane. A file holding an invoice without an
+    identity may still gain one from the Extraction Fallback, so those all share one lane too.
     """
-    results, failed = [], []
-    for path in paths:
-        try:
-            batch = process_path(path, rt)
-        except Exception as exc:  # the file itself could not be processed (e.g. the Ledger)
-            failed.append(_failure(rt, path, exc))
-            continue
-        results.extend(batch.results)
-        failed.extend(batch.failed)
-    return BatchResult(results, failed)
+    parent = list(range(len(ingested)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner: dict[object, int] = {}
+    for i, items in enumerate(ingested):
+        for item in items:
+            key = (item.invoice.identity() if item.invoice else None) or "no identity"
+            parent[find(i)] = find(owner.setdefault(key, i))
+    lanes: dict[int, list[int]] = {}
+    for i in range(len(ingested)):
+        lanes.setdefault(find(i), []).append(i)
+    return sorted(lanes.values())
+
+
+def run_batch(
+    paths: list[Path], rt: Runtime, workers: int = 1, on_start=None, on_done=None
+) -> BatchResult:
+    """Process files, up to `workers` at a time; a processing failure is reported, the rest go on.
+
+    Results and failures come back in `paths` order whatever the worker count. `on_start(name)` and
+    `on_done(name, batch)` run on the worker threads. Every committed invoice is in `results`,
+    also when another invoice of its file failed.
+    """
+    paths = list(paths)
+    if workers <= 1 or len(paths) < 2:
+        parts = [_run_file(path, rt, on_start, on_done) for path in paths]
+    else:
+        ingested = [ingestion.ingest(path) for path in paths]  # never raises, reads files only
+        parts: list[BatchResult | None] = [None] * len(paths)
+
+        def run_lane(lane: list[int]) -> None:
+            for i in lane:
+                parts[i] = _run_file(paths[i], rt, on_start, on_done, ingested[i])
+
+        lanes = _lanes(ingested)
+        with ThreadPoolExecutor(min(workers, len(lanes))) as pool:
+            list(pool.map(run_lane, lanes))
+    return BatchResult(
+        [r for part in parts for r in part.results], [f for part in parts for f in part.failed]
+    )
 
 
 @contextmanager
