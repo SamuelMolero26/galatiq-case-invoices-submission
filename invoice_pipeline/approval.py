@@ -1,5 +1,6 @@
 """The Rule Engine: one Decision per arrival, from the Case File and injected model roles."""
 
+import contextlib
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -32,8 +33,9 @@ def _of(case_file: CaseFile, severity: Severity) -> list[Finding]:
     return [f for f in case_file.findings if f.severity is severity]
 
 
-def _where(finding: Finding) -> str:
-    return f"{finding.code}" + (f" line {finding.line}" if finding.line is not None else "")
+def label(code: FindingCode, line: int | None) -> str:
+    """`"PRICE_DEVIATION line 0"`: how a Warning is named in reasons, failures and feedback."""
+    return f"{code}" + (f" line {line}" if line is not None else "")
 
 
 def check_bounds(case_file: CaseFile) -> list[str]:
@@ -41,12 +43,14 @@ def check_bounds(case_file: CaseFile) -> list[str]:
     failures = []
     for f in _of(case_file, Severity.WARNING):
         if f.code == FindingCode.VENDOR_UNKNOWN:
-            failures.append(f"{_where(f)}: the LLM Critic may never clear it (bound: never)")
+            failures.append(
+                f"{label(f.code, f.line)}: the LLM Critic may never clear it (bound: never)"
+            )
         elif f.code == FindingCode.PRICE_DEVIATION:
             deviation = case_file.references.price_deviations.get(f.line)
             if deviation is not None and deviation > CRITIC_PRICE_CEILING:
                 failures.append(
-                    f"{_where(f)}: deviation {deviation * 100:.2f}% exceeds the "
+                    f"{label(f.code, f.line)}: deviation {deviation * 100:.2f}% exceeds the "
                     f"{CRITIC_PRICE_CEILING * 100:.0f}% Critic Bound"
                 )
     return failures
@@ -60,7 +64,7 @@ def _decision(outcome, reasons, row, decided_by="rule_engine", **extra) -> Decis
 
 def _reasons(findings: list[Finding]) -> list[str]:
     ordered = sorted(findings, key=lambda f: list(Severity).index(f.severity))
-    return [f"{_where(f)}: {f.detail}" for f in ordered]
+    return [f"{label(f.code, f.line)}: {f.detail}" for f in ordered]
 
 
 def _duplicate(case_file: CaseFile) -> Decision:
@@ -113,7 +117,7 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
     elif _of(case_file, Severity.REVIEW_TRIGGER):  # row 3: human-only
         decision = _decision(Outcome.NEEDS_REVIEW, _reasons(case_file.findings), 3)
     elif warnings := _of(case_file, Severity.WARNING):  # rows 4-5
-        names = ", ".join(_where(f) for f in warnings)
+        names = ", ".join(label(f.code, f.line) for f in warnings)
         usd = case_file.references.usd_equivalent
         amount = usd.amount if usd is not None else case_file.invoice.total
         if amount is not None and amount > HEIGHTENED_SCRUTINY_USD:
@@ -163,15 +167,11 @@ _LINE_ITEM_EVIDENCE_FIELDS = {
 }
 
 
-class PathError(ValueError):
-    """An evidence path that cannot be used as evidence."""
-
-
-class MalformedPath(PathError):
+class MalformedPath(ValueError):
     """The path is not in the dot/index grammar."""
 
 
-class UnresolvedPath(PathError):
+class UnresolvedPath(ValueError):
     """A well-formed path that names no concrete value."""
 
 
@@ -233,9 +233,12 @@ class _Evidence:
         if parts[0] == "tool":
             return self._tool(code, line, self.tool_calls[int(parts[1])], parts[2:])
         if parts[0] == "vendor_history":
-            return self._history(parts[1:], self.case_file.vendor_history)
+            verdict = self._history(parts[1:], self.case_file.vendor_history)
+            if isinstance(verdict, GuardrailCause):
+                return verdict
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else verdict
         if parts[0] == "vendor_history_total":
-            return "relevant"
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else "relevant"
         if parts[:2] == ["invoice", "items"]:
             field = parts[3] if len(parts) == 4 else None
             if field not in _LINE_ITEM_EVIDENCE_FIELDS:
@@ -243,7 +246,11 @@ class _Evidence:
             index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
             if index is None or line is None:
                 return "neutral"
-            return "relevant" if index == line else GuardrailCause.CROSS_LINE_EVIDENCE
+            if index != line:
+                return GuardrailCause.CROSS_LINE_EVIDENCE
+            if code is FindingCode.PRICE_DEVIATION:
+                return "relevant" if parts[3:] == ["unit_price"] else "neutral"
+            return "relevant"
         if parts[:2] == ["invoice", "vendor"]:
             return "relevant" if code is FindingCode.VENDOR_UNKNOWN else "neutral"
         if parts[:2] == ["invoice", "currency"]:
@@ -258,13 +265,17 @@ class _Evidence:
             if line is None:
                 return "neutral"
             same = key.casefold() == self.line_sku(line)
-            return "relevant" if same else GuardrailCause.CROSS_LINE_EVIDENCE
+            if not same:
+                return GuardrailCause.CROSS_LINE_EVIDENCE
+            if code is FindingCode.PRICE_DEVIATION and table != "reference_prices":
+                return "neutral"
+            return "relevant"
         if table == "price_deviations" and key is not None:
             if line is None:
                 return "neutral"
             return "relevant" if key == str(line) else GuardrailCause.CROSS_LINE_EVIDENCE
         if table == "price_tolerance":
-            return "relevant" if code is FindingCode.PRICE_DEVIATION else "neutral"
+            return "neutral"
         if table == "usd_equivalent":
             return "relevant" if code is FindingCode.CURRENCY_NON_USD else "neutral"
         return "neutral"
@@ -285,13 +296,21 @@ class _Evidence:
                 index = int(parts[2])
                 if index < len(entries) and entries[index].get("currency") != self.currency:
                     return GuardrailCause.WRONG_HISTORY_CURRENCY
-            return "relevant"
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else "relevant"
         if line is None:
             return "neutral"
         if call.name == "get_invoice_line":
-            return "relevant" if args.get("n") == line else GuardrailCause.CROSS_LINE_EVIDENCE
+            if args.get("n") != line:
+                return GuardrailCause.CROSS_LINE_EVIDENCE
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else "relevant"
         same = str(args.get("sku", "")).casefold() == self.line_sku(line)
-        return "relevant" if same else GuardrailCause.CROSS_LINE_EVIDENCE
+        if not same:
+            return GuardrailCause.CROSS_LINE_EVIDENCE
+        if code is FindingCode.PRICE_DEVIATION:
+            result = call.result or {}
+            is_price = call.name == "get_reference_price" and parts == ["result", "unit_price"]
+            return "relevant" if is_price and result.get("found") is True else "neutral"
+        return "relevant"
 
 
 def check_assessments(
@@ -309,14 +328,14 @@ def check_assessments(
         if key not in wanted or key in by_key:
             why = "duplicate" if key in by_key else "not a Warning of this invoice"
             failures.append(
-                _failure(GuardrailCause.WRONG_ASSESSMENT, _label(*key), f"assessment is {why}")
+                _failure(GuardrailCause.WRONG_ASSESSMENT, label(*key), f"assessment is {why}")
             )
         else:
             by_key[key] = a
     for key in wanted:
         if key not in by_key:
             failures.append(
-                _failure(GuardrailCause.MISSING_ASSESSMENT, _label(*key), "no assessment given")
+                _failure(GuardrailCause.MISSING_ASSESSMENT, label(*key), "no assessment given")
             )
     root = case_file.model_dump(mode="json")
     judge = _Evidence(case_file, tool_calls)
@@ -326,12 +345,8 @@ def check_assessments(
     return failures
 
 
-def _label(code: FindingCode, line: int | None) -> str:
-    return f"{code}" + (f" line {line}" if line is not None else "")
-
-
 def _check_one(judge: _Evidence, root: dict, tool_calls, a: WarningAssessment):
-    where = _label(a.code, a.line)
+    where = label(a.code, a.line)
     if not a.explained:
         return [
             _failure(
@@ -404,20 +419,20 @@ def accept_verdict(
     wanted = list(dict.fromkeys((f.code, f.line) for f in _of(case_file, Severity.WARNING)))
     counts = Counter((c.code, c.line) for c in verifier.checks)
     malformed = (
-        [f"Verifier check missing for {_label(*key)}" for key in wanted if key not in counts]
+        [f"Verifier check missing for {label(*key)}" for key in wanted if key not in counts]
         + [
-            f"Verifier check for {_label(*key)} is not an assessed Warning"
+            f"Verifier check for {label(*key)} is not an assessed Warning"
             for key in counts
             if key not in wanted
         ]
-        + [f"Verifier gave {n} checks for {_label(*key)}" for key, n in counts.items() if n > 1]
+        + [f"Verifier gave {n} checks for {label(*key)}" for key, n in counts.items() if n > 1]
     )
     if malformed:
         return Verdict(False, False, False, malformed)
     false = [c for c in verifier.checks if not c.holds]
     if false:
         reasons = [
-            f"{_label(c.code, c.line)}: the Verifier rejected the explanation: {c.rationale}"
+            f"{label(c.code, c.line)}: the Verifier rejected the explanation: {c.rationale}"
             for c in false
         ]
         return Verdict(False, True, True, reasons, feedback=" ".join(reasons))
@@ -429,10 +444,8 @@ def _refusal(failure: GuardrailFailure) -> str:
 
 
 def _step(agents: Agents, event: str, attempt: int) -> None:
-    try:
+    with contextlib.suppress(Exception):  # an observer never changes a decision
         agents.on_step(event, {"attempt": attempt})
-    except Exception:  # an observer never changes a decision
-        pass
 
 
 def _attempt(case_file: CaseFile, agents: Agents, number: int, feedback, scratch, calls):
@@ -455,7 +468,7 @@ def orchestrate(case_file: CaseFile, agents: Agents) -> Decision:
     Never raises. No usable answer (offline, transport, exhausted tries, a raising role, a
     malformed Verifier answer) is Unreviewed Warnings; a usable refusal is Needs Review.
     """
-    names = ", ".join(_where(f) for f in _of(case_file, Severity.WARNING))
+    names = ", ".join(label(f.code, f.line) for f in _of(case_file, Severity.WARNING))
     scratch: dict = {}
     attempts: list[CriticAttempt] = []
     calls: list[ToolCall] = []
@@ -479,11 +492,9 @@ def orchestrate(case_file: CaseFile, agents: Agents) -> Decision:
                 break
             feedback = verdict.feedback
     finally:
-        for cleanup in scratch.get("cleanup", []):
-            try:
-                cleanup()
-            except Exception:
-                pass
+        if runner := scratch.get("runner"):
+            with contextlib.suppress(Exception):
+                runner.close()
     critic = CriticRecord(attempts=attempts) if attempts else None
     if verdict.approved:
         reasons = [f"LLM_CRITIC: {names} explained by evidence and verified"]

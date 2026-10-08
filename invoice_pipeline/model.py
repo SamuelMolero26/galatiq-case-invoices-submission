@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, StrictBool
+from pydantic import AfterValidator, BaseModel, BeforeValidator, StrictBool
 
 
 class Severity(StrEnum):
@@ -86,6 +86,15 @@ def _no_float(value):
 
 
 Money = Annotated[Decimal, BeforeValidator(_no_float)]
+
+
+def _nonblank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must not be blank")
+    return value
+
+
+NonBlankString = Annotated[str, AfterValidator(_nonblank)]
 
 
 def vendor_key(name: str | None) -> str | None:
@@ -244,7 +253,7 @@ class WarningAssessment(BaseModel, frozen=True, extra="forbid"):
     line: int | None
     explained: StrictBool
     evidence: list[str]
-    rationale: str
+    rationale: NonBlankString
 
 
 class VerifyCheck(BaseModel, frozen=True, extra="forbid"):
@@ -253,7 +262,7 @@ class VerifyCheck(BaseModel, frozen=True, extra="forbid"):
     code: FindingCode
     line: int | None
     holds: StrictBool
-    rationale: str
+    rationale: NonBlankString
 
 
 class GuardrailCause(StrEnum):
@@ -357,8 +366,8 @@ class Agents:
 
     Offline callables answer None (no usable answer). The full-gate roles are
     `assess(case_file, attempt, feedback, scratch) -> AssessCall | None` (`scratch` is a
-    per-invoice dict shared by both attempts; `scratch["cleanup"]` lists callables the
-    orchestrator runs afterwards) and
+    per-invoice dict shared by both attempts; the orchestrator closes `scratch["runner"]`
+    afterwards) and
     `verify(case_file, assessments, tool_calls, attempt) -> VerifyCall | None`.
     """
 

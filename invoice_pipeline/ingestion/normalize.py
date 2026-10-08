@@ -9,7 +9,15 @@ from invoice_pipeline.model import Repair
 _CENT = Decimal("0.01")
 _NUMBER = re.compile(r"-?\d+(\.\d+)?")
 _O_FOR_ZERO = re.compile(r"(?<=[\d.,])[Oo]|[Oo](?=\d)")  # the letter O read in a digit position
-_DATE_FORMATS = ("%Y-%m-%d", "%d-%b-%Y", "%b %d %Y", "%b %d, %Y", "%B %d %Y", "%B %d, %Y")
+_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%m/%d/%Y",
+    "%d-%b-%Y",
+    "%b %d %Y",
+    "%b %d, %Y",
+    "%B %d %Y",
+    "%B %d, %Y",
+)
 
 
 def clean_text(raw: str | None) -> str | None:
