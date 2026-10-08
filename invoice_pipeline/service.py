@@ -508,7 +508,7 @@ def discover(source: Path | str) -> Discovery:
     return Discovery(paths, dict(types))
 
 
-def process_path(path: Path | str, rt: Runtime) -> BatchResult:
+def process_path(path: Path | str, rt: Runtime) -> "BatchResult":
     """Ingest one file, then decide, record and (when Approved) pay each invoice in it
     independently; a failing invoice is reported and the rest of the file continues."""
     path = Path(path)
