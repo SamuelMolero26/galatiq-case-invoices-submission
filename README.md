@@ -71,6 +71,9 @@ uv run python main.py tui --ledger=demo-ledger.db --inventory=demo-inventory.db 
 
 The TUI browses what is already in the ledger, so run step 3 first against the same database files.
 
+Starting a run from the TUI's new-run view shows live progress per file, what each file parsed
+into (vendor, number, total, findings) in the ingestion pane, and the agent log.
+
 ### Optional: the offline baseline
 
 Offline mode performs no model or external network calls, so it needs no keys. It is the
