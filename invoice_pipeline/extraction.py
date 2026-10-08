@@ -8,7 +8,7 @@ the ordinary validation, and any supplied field is a review trigger (LLM_EXTRACT
 import json
 import re
 from collections.abc import Sequence
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from invoice_pipeline.ingestion.normalize import parse_money
 from invoice_pipeline.llm import CorrectableError, TierConfig, ask, chat, role_call
@@ -63,7 +63,7 @@ def parse_extraction(
         return CorrectableError("answer must be a JSON object")
     if set(data) != set(fields):
         return CorrectableError(f"answer must have exactly these keys: {', '.join(fields)}")
-    amounts = {_decimal(m.replace(",", "")) for m in _AMOUNT.findall(raw_text)}
+    amounts = {Decimal(m.replace(",", "")) for m in _AMOUNT.findall(raw_text)}
     document = _squash(raw_text)
     for name, value in data.items():
         if value is None:
@@ -73,7 +73,7 @@ def parse_extraction(
         if name == "total":
             if not _PLAIN_DECIMAL.fullmatch(value):
                 return CorrectableError("total must be a plain decimal such as 1250.00")
-            if _decimal(value) not in amounts:
+            if Decimal(value) not in amounts:
                 return CorrectableError("total does not appear in the document")
         elif name == "invoice_number" and not _INVOICE_NUMBER.fullmatch(value):
             return CorrectableError("invoice_number must look like INV-1013 or INV 1013")
@@ -82,13 +82,6 @@ def parse_extraction(
         elif _squash(value) not in document:
             return CorrectableError(f"{name} does not appear in the document")
     return data
-
-
-def _decimal(text: str) -> Decimal | None:
-    try:
-        return Decimal(text)
-    except InvalidOperation:
-        return None
 
 
 def extract(tier: TierConfig, raw_text: str, fields: list[str], *, chat_fn=chat) -> RoleCall:
