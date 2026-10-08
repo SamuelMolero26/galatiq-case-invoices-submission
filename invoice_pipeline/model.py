@@ -232,7 +232,7 @@ class ToolCall(BaseModel):
     elapsed_ms: int | None
 
 
-class WarningAssessment(BaseModel, frozen=True):
+class WarningAssessment(BaseModel, frozen=True, extra="forbid"):
     """One assessed Warning, in the strict shape settled by gate 2.5.
 
     The Assessor returns one per `(code, line)`; the 2.11 evidence guardrail
@@ -246,7 +246,7 @@ class WarningAssessment(BaseModel, frozen=True):
     rationale: str
 
 
-class VerifyCheck(BaseModel, frozen=True):
+class VerifyCheck(BaseModel, frozen=True, extra="forbid"):
     """The Verifier's independent re-validation of one assessed Warning (strict, no coercion)."""
 
     code: FindingCode

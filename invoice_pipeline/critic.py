@@ -1,7 +1,8 @@
 import json
+from collections.abc import Sequence
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD
 from invoice_pipeline.catalog import Catalog
@@ -19,11 +20,21 @@ from invoice_pipeline.model import (
     RoleCall,
     Severity,
     UsdEquivalent,
+    VerifyCheck,
+    WarningAssessment,
 )
 from invoice_pipeline.prompts import WARNING_CHECKLIST
 from invoice_pipeline.validation import PRICE_TOLERANCE, aggregate_quantities, price_deviations
 
 OFFLINE_TIER = "offline tier"
+
+
+def _where_of(code: FindingCode, line: int | None) -> str:
+    return f"{code}" + (f" line {line}" if line is not None else "")
+
+
+def _where(entry) -> str:
+    return _where_of(entry.code, entry.line)
 
 
 def build_case_file(
@@ -215,3 +226,76 @@ def online_agents(tier: TierConfig) -> Agents:
         escalate_review=escalate_review,
         advise=advise,
     )
+
+
+def _parse_entries[M: BaseModel](
+    content: str, key: str, model: type[M]
+) -> tuple[list[M | None], list[str]]:
+    """Parse `{key: [entry, ...]}` strictly. Returns one slot per entry (None where it failed)
+    and every error found, so a single bad entry never discards the valid ones."""
+    try:
+        data = json.loads(content)
+    except ValueError as exc:
+        return [], [f"answer is not valid JSON: {exc}"]
+    if not isinstance(data, dict) or not isinstance(data.get(key), list) or set(data) != {key}:
+        return [], [f"answer must be a JSON object with exactly one field {key!r}: a list"]
+    parsed: list[M | None] = []
+    errors = []
+    for index, item in enumerate(data[key]):
+        label = f"{key}[{index}]"
+        if not isinstance(item, dict):
+            parsed.append(None)
+            errors.append(f"{label}: must be a JSON object")
+            continue
+        try:
+            parsed.append(model.model_validate_json(json.dumps(item), strict=True))
+        except ValidationError as exc:
+            parsed.append(None)
+            for problem in exc.errors():
+                field = ".".join(str(part) for part in problem["loc"]) or "value"
+                errors.append(f"{label}: field '{field}': {problem['msg']}")
+    return parsed, errors
+
+
+def _duplicates(entries: list, key: str) -> list[str]:
+    seen: dict[tuple, int] = {}
+    errors = []
+    for index, entry in enumerate(entries):
+        if entry is None:
+            continue
+        where = (entry.code, entry.line)
+        if where in seen:
+            errors.append(f"{key}[{index}]: duplicate of {key}[{seen[where]}] (one per code+line)")
+        seen.setdefault(where, index)
+    return errors
+
+
+def _correction(key: str, entries: list, errors: list[str]) -> CorrectableError:
+    valid = [f"{key}[{i}] is valid" for i, e in enumerate(entries) if e is not None]
+    bad = len(entries) - len(valid)
+    keep = f" ({'; '.join(valid)}; resend it unchanged)" if valid and bad else ""
+    return CorrectableError("; ".join(errors) + keep)
+
+
+def parse_assessor(content: str) -> list[WarningAssessment] | CorrectableError:
+    """Strict Assessor answer: `{"assessments": [...]}`, one per `(code, line)`, no coercion."""
+    entries, errors = _parse_entries(content, "assessments", WarningAssessment)
+    errors += _duplicates(entries, "assessments")
+    return _correction("assessments", entries, errors) if errors else entries
+
+
+def parse_verifier(
+    content: str, expected: Sequence[tuple[FindingCode, int | None]]
+) -> list[VerifyCheck] | CorrectableError:
+    """Strict Verifier answer: exactly one check per assessed Warning in `expected`.
+
+    A missing, stray, or duplicate check is correctable.
+    """
+    entries, errors = _parse_entries(content, "checks", VerifyCheck)
+    errors += _duplicates(entries, "checks")
+    known = {(e.code, e.line) for e in entries if e is not None}
+    for index, entry in enumerate(entries):
+        if entry is not None and (entry.code, entry.line) not in expected:
+            errors.append(f"checks[{index}]: not an assessed Warning ({_where(entry)})")
+    errors += [f"missing check for {_where_of(*want)}" for want in expected if want not in known]
+    return _correction("checks", entries, errors) if errors else entries
