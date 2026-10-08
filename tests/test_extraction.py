@@ -5,13 +5,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from conftest import ScriptedChat, text_reply
+from conftest import Harness, ScriptedChat, text_reply
 
-from invoice_pipeline import extraction
+from invoice_pipeline import extraction, ledger
 from invoice_pipeline.critic import offline_agents, online_agents
 from invoice_pipeline.ingestion.text import parse_text
 from invoice_pipeline.llm import CorrectableError, LLMError
-from invoice_pipeline.model import Agents, FindingCode, Ingested, RoleCall
+from invoice_pipeline.model import Agents, FindingCode, Ingested, Outcome, RoleCall
 from invoice_pipeline.validation import validate
 
 FIXTURES = Path(__file__).parent / "fixtures" / "extraction"
@@ -278,3 +278,67 @@ def test_online_agents_extract_built_offline_none(grok):
 
     assert call.role == "extraction" and call.answer == {"total": "1000.00"}
     assert offline_agents().extract is None
+
+
+# --- service level: gating, never paid, grounded only (EXT-6) --------------------------
+
+ADVICE = text_reply(json.dumps({"rationale": "explained for the reviewer"}))
+
+
+def txt(vendor="Precision Parts Ltd.", number="INV-2001", total=None, note=""):
+    """A messy TXT invoice; a None field is left out of the document."""
+    lines = [f"Vendor: {vendor}" if vendor else None, f"Invoice: {number}" if number else None]
+    lines += ["Date: 2026-01-05", "", "WidgetA  qty: 4  unit price: $250.00", "", note]
+    lines += [f"Total: {total}" if total else "Please remit 1,000.00 within 30 days."]
+    return "\n".join(line for line in lines if line is not None) + "\n"
+
+
+def reply(**fields):
+    return text_reply(json.dumps(fields))
+
+
+def stored(harness, arrival_id):
+    conn = ledger.connect(harness.ledger_path)
+    try:
+        row = conn.execute("SELECT * FROM arrivals WHERE id = ?", (arrival_id,)).fetchone()
+    finally:
+        conn.close()
+    return row, json.loads(row["record"])
+
+
+def test_txt_online_needs_review_never_paid(tmp_path, grok):
+    h = Harness(tmp_path, grok, reply(total="1000.00"), ADVICE)
+
+    result = h.process("invoice.txt", txt())
+
+    assert result.decision == Outcome.NEEDS_REVIEW and result.state == "needs_review"
+    assert result.precedence_row == 3 and "LLM_EXTRACTED" in result.finding_codes
+    assert "LLM_EXTRACTED: invoice.total supplied by the Extraction Fallback" in result.reasons
+    assert h.paid == []
+    row, record = stored(h, result.arrival_id)
+    assert record["invoice"]["total"] == "1000.00"
+    assert record["invoice"]["extracted_fields"] == ["total"]
+
+
+def test_extraction_failure_keeps_deterministic_findings_unpaid(tmp_path, grok):
+    h = Harness(tmp_path, grok, LLMError("HTTP 500"), ADVICE)
+
+    result = h.process("invoice.txt", txt())
+
+    assert result.decision != Outcome.APPROVED and h.paid == []
+    assert "LLM_EXTRACTED" not in result.finding_codes
+    assert "MISSING_REQUIRED_FIELD" in result.finding_codes
+
+
+def test_injection_text_only_grounded_requested_fields(tmp_path, grok):
+    text = (FIXTURES / "injection.txt").read_text()
+    h = Harness(tmp_path, grok, reply(total="999999"), reply(total="500.00"), ADVICE)
+
+    result = h.process("invoice.txt", text)
+
+    assert result.decision != Outcome.APPROVED and h.paid == []
+    _, record = stored(h, result.arrival_id)
+    assert record["invoice"]["total"] == "500.00"
+    assert record["invoice"]["extracted_fields"] == ["total"]
+    assert record["invoice"]["vendor"] == "Acme Corp"  # never requested, never touched
+    assert len(h.chat.requests) == 3  # one correction, then the advisory
