@@ -89,3 +89,67 @@ def make_case_file(catalog):
         )
 
     return make
+
+
+class ScriptedChat:
+    """A fake `chat_fn`: replays scripted replies and records every request it receives."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.requests: list[dict] = []
+
+    def __call__(self, tier, messages, tools=None):
+        self.requests.append({"messages": [dict(m) for m in messages], "tools": tools})
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def text_reply(content: str):
+    from invoice_pipeline.llm import ChatReply
+
+    return ChatReply(content, [], {"role": "assistant", "content": content}, None)
+
+
+def tool_reply(name: str, arguments: str, call_id: str = "c1"):
+    from invoice_pipeline.llm import ChatReply, ToolRequest
+
+    message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+        ],
+    }
+    return ChatReply(None, [ToolRequest(call_id, name, arguments)], message, None)
+
+
+@pytest.fixture
+def grok():
+    from invoice_pipeline.llm import TierConfig
+
+    return TierConfig(tier="grok", model="test-model", base_url="http://llm.invalid", timeout_s=1)
+
+
+@pytest.fixture
+def tool_runner(tmp_path, catalog, make_case_file):
+    """A ToolRunner over real read-only inventory and ledger connections."""
+    from invoice_pipeline import catalog as catalog_module
+    from invoice_pipeline import ledger
+    from invoice_pipeline.tools import ToolRunner, open_readonly
+
+    inventory = tmp_path / "inventory.db"
+    catalog_module.seed(inventory)
+    ledger.connect(tmp_path / "ledger.db").close()
+    case_file = make_case_file()
+
+    def make(budget: int = 8) -> ToolRunner:
+        return ToolRunner(
+            open_readonly(inventory),
+            open_readonly(tmp_path / "ledger.db"),
+            case_file.invoice,
+            budget,
+        )
+
+    return make

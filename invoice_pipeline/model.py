@@ -351,12 +351,15 @@ class Decision(BaseModel):
 class Agents:
     """Model roles injected into `approval.decide`; scripted fakes in tests.
 
-    Slice 1 supplies offline callables. Callable signatures are tightened when the
-    full-gate contracts arrive (assess/verify), without changing these fields.
+    Offline callables answer None (no usable answer). The full-gate roles are
+    `assess(case_file, attempt, feedback, scratch) -> AssessCall | None` (`scratch` is a
+    per-invoice dict shared by both attempts; `scratch["cleanup"]` lists callables the
+    orchestrator runs afterwards) and
+    `verify(case_file, assessments, tool_calls, attempt) -> VerifyCall | None`.
     """
 
-    assess: Callable[..., Any]
-    verify: Callable[..., Any]
+    assess: Callable[..., AssessCall | None]
+    verify: Callable[..., VerifyCall | None]
     escalate_review: Callable[[CaseFile], RoleCall]
     advise: Callable[[CaseFile, Decision], RoleCall]
     on_step: Callable[[str, dict], None] = field(default=lambda event, detail: None)

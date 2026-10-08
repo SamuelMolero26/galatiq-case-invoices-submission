@@ -4,26 +4,31 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD
+from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD, check_assessments
 from invoice_pipeline.catalog import Catalog
-from invoice_pipeline.llm import CorrectableError, TierConfig, ask, role_call
+from invoice_pipeline.llm import CorrectableError, FinalError, TierConfig, ask, chat, role_call
 from invoice_pipeline.model import (
     Agents,
     ArrivalSummary,
+    AssessCall,
     CaseFile,
     Decision,
     Finding,
     FindingCode,
+    GuardrailFailure,
     HistoryEntry,
     Invoice,
     References,
     RoleCall,
     Severity,
+    ToolCall,
     UsdEquivalent,
+    VerifyCall,
     VerifyCheck,
     WarningAssessment,
 )
-from invoice_pipeline.prompts import WARNING_CHECKLIST
+from invoice_pipeline.prompts import ASSESSOR_PROMPT, VERIFIER_PROMPT, WARNING_CHECKLIST
+from invoice_pipeline.tools import TOOL_SCHEMAS, ToolRunner
 from invoice_pipeline.validation import PRICE_TOLERANCE, aggregate_quantities, price_deviations
 
 OFFLINE_TIER = "offline tier"
@@ -205,24 +210,47 @@ def _advisory_messages(case_file: CaseFile, decision: Decision) -> list[dict]:
     ]
 
 
-def online_agents(tier: TierConfig) -> Agents:
-    """The `Agents` bundle for the grok tier: escalate-only + advisory via `ask`/`role_call`.
+def online_agents(tier: TierConfig, tool_factory=None, chat_fn=chat) -> Agents:
+    """The `Agents` bundle for the grok tier.
 
-    assess/verify stay no-answer stubs until slice 2c. An unusable answer (malformed,
-    exhausted, FinalError) surfaces as answer None with error, and `decide` fails closed.
+    `tool_factory(case_file)` builds the invoice's `ToolRunner` (read-only connections); the
+    Assessor gets tools only when it is supplied. The runner lives in the per-invoice `scratch`
+    so both attempts share one budget, and its cleanup is registered there for the orchestrator.
+    An unusable answer surfaces as an unaccepted record or None, and `decide` fails closed.
     """
 
     def escalate_review(case_file: CaseFile) -> RoleCall:
-        asked = ask(tier, _escalate_messages(case_file), _validate_escalate(case_file))
+        asked = ask(
+            tier, _escalate_messages(case_file), _validate_escalate(case_file), chat_fn=chat_fn
+        )
         return role_call("escalate_review", tier, asked)
 
     def advise(case_file: CaseFile, decision: Decision) -> RoleCall:
-        asked = ask(tier, _advisory_messages(case_file, decision), _validate_advisory)
+        asked = ask(
+            tier, _advisory_messages(case_file, decision), _validate_advisory, chat_fn=chat_fn
+        )
         return role_call("advisory", tier, asked)
 
+    def assess_role(case_file: CaseFile, attempt: int, feedback: str | None, scratch: dict):
+        runner = scratch.get("runner")
+        if runner is None and tool_factory is not None:
+            try:
+                runner = scratch["runner"] = tool_factory(case_file)
+            except Exception as exc:
+                error = f"tool setup failure: {type(exc).__name__}: {exc}"
+                return _failed_call(AssessCall, attempt, tier, error)
+            if close := getattr(runner, "close", None):
+                scratch.setdefault("cleanup", []).append(close)
+        return assess(
+            tier, case_file, runner=runner, attempt=attempt, feedback=feedback, chat_fn=chat_fn
+        )
+
+    def verify_role(case_file, assessments, tool_calls, attempt):
+        return verify(tier, case_file, assessments, tool_calls, attempt, chat_fn=chat_fn)
+
     return Agents(
-        assess=lambda *args, **kwargs: None,  # slice 2c: full-gate assessor
-        verify=lambda *args, **kwargs: None,  # slice 2c: full-gate verifier
+        assess=assess_role,
+        verify=verify_role,
         escalate_review=escalate_review,
         advise=advise,
     )
@@ -299,3 +327,124 @@ def parse_verifier(
             errors.append(f"checks[{index}]: not an assessed Warning ({_where(entry)})")
     errors += [f"missing check for {_where_of(*want)}" for want in expected if want not in known]
     return _correction("checks", entries, errors) if errors else entries
+
+
+def _guardrail_message(failures: list[GuardrailFailure]) -> str:
+    listed = "; ".join(f"{f.where}: {f.message} [{f.cause.value}]" for f in failures)
+    return f"The evidence guardrail refused the answer: {listed}. Resend the full JSON answer."
+
+
+def _failed_call[T: BaseModel](kind: type[T], attempt: int, tier: TierConfig, error: str, **extra):
+    return kind(attempt=attempt, model=tier.model, error=error, **extra)
+
+
+def assess(
+    tier: TierConfig,
+    case_file: CaseFile,
+    *,
+    runner: ToolRunner | None = None,
+    attempt: int = 1,
+    feedback: str | None = None,
+    chat_fn=chat,
+) -> AssessCall:
+    """One Assessor attempt. Never raises: every failure comes back as an audit record.
+
+    Tool calls go through `runner`, whose single budget is shared by both attempts. A guardrail
+    failure is a Correction Wrapper correction; only `UNEXPLAINED` is final. `accepted` means the
+    answer parsed, passed the guardrail, and explains every Warning.
+    """
+    if tier.tier == "offline":
+        return _failed_call(AssessCall, attempt, tier, OFFLINE_TIER)
+    seen = len(runner.calls) if runner else 0
+    state: dict[str, list] = {"assessments": [], "failures": []}
+
+    def validate(content: str):
+        parsed = parse_assessor(content)
+        if isinstance(parsed, CorrectableError):
+            return parsed
+        state["assessments"] = parsed
+        state["failures"] = check_assessments(case_file, parsed, runner.calls if runner else [])
+        if not state["failures"]:
+            return parsed
+        message = _guardrail_message(state["failures"])
+        final = any(not f.correctable for f in state["failures"])
+        return FinalError(message) if final else CorrectableError(message)
+
+    messages = [
+        {"role": "system", "content": ASSESSOR_PROMPT},
+        {"role": "user", "content": case_file.model_dump_json(exclude={"decision_context"})},
+    ]
+    if feedback:
+        messages.append(
+            {
+                "role": "user",
+                "content": f"The Verifier rejected your previous assessment: {feedback} "
+                "Reassess every Warning from the facts.",
+            }
+        )
+    try:
+        asked = ask(
+            tier,
+            messages,
+            validate,
+            tools=TOOL_SCHEMAS if runner else None,
+            run_tool=(lambda name, args: runner.run(attempt, name, args)) if runner else None,
+            chat_fn=chat_fn,
+        )
+        return AssessCall(
+            attempt=attempt,
+            model=tier.model,
+            tries=asked.tries,
+            assessments=state["assessments"],
+            failures=state["failures"],
+            tool_calls=runner.calls[seen:] if runner else [],
+            accepted=asked.value is not None,
+            exhausted=asked.exhausted,
+            error=asked.error,
+        )
+    except Exception as exc:  # the gate fails closed; it never raises into the pipeline
+        return _failed_call(AssessCall, attempt, tier, f"{type(exc).__name__}: {exc}")
+
+
+def verify(
+    tier: TierConfig,
+    case_file: CaseFile,
+    assessments: list[WarningAssessment],
+    tool_calls: list[ToolCall],
+    attempt: int = 1,
+    *,
+    chat_fn=chat,
+) -> VerifyCall:
+    """One Verifier pass over a guardrail-accepted assessment. No tools; never raises.
+
+    It receives every recorded tool result so it can check claims against what was looked up.
+    """
+    if tier.tier == "offline":
+        return _failed_call(VerifyCall, attempt, tier, OFFLINE_TIER)
+    expected = [(a.code, a.line) for a in assessments]
+    payload = {
+        "case_file": case_file.model_dump(mode="json", exclude={"decision_context"}),
+        "assessments": [a.model_dump(mode="json") for a in assessments],
+        "tool_results": [
+            c.model_dump(mode="json", include={"index", "name", "arguments", "result", "error"})
+            for c in tool_calls
+        ],
+    }
+    messages = [
+        {"role": "system", "content": VERIFIER_PROMPT},
+        {"role": "user", "content": json.dumps(payload)},
+    ]
+    try:
+        asked = ask(
+            tier, messages, lambda content: parse_verifier(content, expected), chat_fn=chat_fn
+        )
+        return VerifyCall(
+            attempt=attempt,
+            model=tier.model,
+            tries=asked.tries,
+            checks=asked.value or [],
+            accepted=asked.value is not None,
+            error=asked.error,
+        )
+    except Exception as exc:
+        return _failed_call(VerifyCall, attempt, tier, f"{type(exc).__name__}: {exc}")
