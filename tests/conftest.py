@@ -1,5 +1,10 @@
 """Small shared fixtures for the selected Slice 2C closure tests."""
 
+import builtins
+import contextlib
+import io
+import os
+import socket
 from decimal import Decimal
 
 import pytest
@@ -111,3 +116,51 @@ def grok():
     from invoice_pipeline.llm import TierConfig
 
     return TierConfig(tier="grok", model="test-model", base_url="http://llm.invalid", timeout_s=1)
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Fail every outbound connection attempt; returns the recorded `(kind, target)` attempts."""
+    attempts: list[tuple[str, object]] = []
+
+    def blocked(kind):
+        def refuse(*args, **kwargs):
+            attempts.append((kind, args[1] if kind == "connect" and len(args) > 1 else args[:1]))
+            raise RuntimeError(f"network access blocked in tests: {kind}")
+
+        return refuse
+
+    monkeypatch.setattr(socket.socket, "connect", blocked("connect"))
+    monkeypatch.setattr(socket.socket, "connect_ex", blocked("connect_ex"))
+    monkeypatch.setattr(socket, "create_connection", blocked("create_connection"))
+    monkeypatch.setattr(socket, "getaddrinfo", blocked("getaddrinfo"))
+    return attempts
+
+
+@pytest.fixture
+def no_fs_access():
+    """A context-manager factory: inside `with`, file opens and eval/exec are refused and recorded.
+
+    Scoped to the `with` so pytest's own file handling is never affected.
+    """
+
+    @contextlib.contextmanager
+    def guard():
+        attempts: list[tuple[str, object]] = []
+
+        def blocked(kind):
+            def refuse(*args, **kwargs):
+                attempts.append((kind, args[:1]))
+                raise PermissionError(f"filesystem/eval access blocked in tests: {kind}")
+
+            return refuse
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(builtins, "open", blocked("open"))
+            patch.setattr(io, "open", blocked("io.open"))
+            patch.setattr(os, "open", blocked("os.open"))
+            patch.setattr(builtins, "eval", blocked("eval"))
+            patch.setattr(builtins, "exec", blocked("exec"))
+            yield attempts
+
+    return guard
