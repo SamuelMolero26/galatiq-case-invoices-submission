@@ -1,0 +1,5 @@
+Vendor: Acme Corp
+Invoice: INV-2004
+Total: 500.00
+
+WidgetA  qty: 2  unit price: $250.00

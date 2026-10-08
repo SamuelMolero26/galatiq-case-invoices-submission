@@ -1,0 +1,6 @@
+Date: 2026-01-05
+
+WidgetA  qty: 4  unit price: $250.00
+
+Thanks from the team at Acme Corp, reference INV 2002 for this order.
+Grand sum 1,000.00
