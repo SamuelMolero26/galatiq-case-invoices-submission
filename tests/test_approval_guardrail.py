@@ -79,6 +79,8 @@ def test_evidence_from_another_line_is_cross_line(make_case_file):
 
 
 def test_tool_evidence_for_the_line_is_accepted(case_file):
-    call = tool_call(0, "get_reference_price", {"sku": "WidgetA"}, {"unit_price": 250})
+    call = tool_call(
+        0, "get_reference_price", {"sku": "WidgetA"}, {"found": True, "unit_price": 250}
+    )
     ok = assessment(evidence=["tool.0.result.unit_price"])
     assert check_assessments(case_file, [ok], [call]) == []
