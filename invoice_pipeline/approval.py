@@ -1,6 +1,8 @@
 """The Rule Engine: one Decision per arrival, from the Case File and injected model roles."""
 
+import re
 from decimal import Decimal
+from typing import Any
 
 from invoice_pipeline.model import (
     Agents,
@@ -8,8 +10,13 @@ from invoice_pipeline.model import (
     Decision,
     Finding,
     FindingCode,
+    GuardrailCause,
+    GuardrailFailure,
     Outcome,
     Severity,
+    ToolCall,
+    WarningAssessment,
+    vendor_key,
 )
 from invoice_pipeline.validation import PRICE_TOLERANCE
 
@@ -118,3 +125,212 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
         return _decision(Outcome.NEEDS_REVIEW, [reason], 6, escalate_review=call)
     decision.advisory = agents.advise(case_file, decision)  # explains; never read back
     return decision
+
+
+# --- evidence guardrail ----------------------------------------------------------------------
+
+_SEGMENT = re.compile(r"[A-Za-z0-9_-]+")
+_SELF_ROOTS = {"findings", "checklist", "decision_context"}
+_SKU_TABLES = {"reference_prices", "stock_levels", "aggregated_quantities"}
+
+
+class PathError(ValueError):
+    """An evidence path that cannot be used as evidence."""
+
+
+class MalformedPath(PathError):
+    """The path is not in the dot/index grammar."""
+
+
+class UnresolvedPath(PathError):
+    """A well-formed path that names no concrete value."""
+
+
+def resolve_path(root: dict, tool_calls: list[ToolCall], path: str) -> Any:
+    """Resolve a dotted path over in-memory JSON (the Case File dump, or `tool.<n>.<path>`).
+
+    The grammar is segments of `[A-Za-z0-9_-]` joined by dots; digits index lists. Nothing is
+    evaluated and no file is touched. The value must be concrete: not null, not a whole
+    record (object), not an empty list.
+    """
+    parts = path.split(".")
+    if not all(_SEGMENT.fullmatch(part) for part in parts):
+        raise MalformedPath(f"{path!r} is not a dotted path of names and list indexes")
+    node: Any = root
+    if parts[0] == "tool":
+        index = parts[1] if len(parts) > 1 else ""
+        if not index.isdigit() or int(index) >= len(tool_calls) or tool_calls[int(index)].error:
+            raise UnresolvedPath(f"{path!r} names no successful tool call")
+        call = tool_calls[int(index)]
+        node, parts = (
+            call.model_dump(mode="json", include={"name", "arguments", "result"}),
+            parts[2:],
+        )
+    for part in parts:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        else:
+            raise UnresolvedPath(f"{path!r} names no value in the Case File or tool results")
+    if node is None or isinstance(node, dict) or node == []:
+        raise UnresolvedPath(f"{path!r} must name a concrete non-null value, not a whole record")
+    return node
+
+
+def _failure(cause: GuardrailCause, where: str, message: str, correctable: bool = True):
+    return GuardrailFailure(cause=cause, where=where, message=message, correctable=correctable)
+
+
+class _Evidence:
+    """Judges whether one resolvable evidence path belongs to one assessed Warning."""
+
+    def __init__(self, case_file: CaseFile, tool_calls: list[ToolCall]):
+        self.case_file, self.tool_calls = case_file, tool_calls
+        self.invoice = case_file.invoice
+        self.currency = case_file.invoice.currency
+        self.vendor = vendor_key(case_file.invoice.vendor)
+
+    def line_sku(self, line: int | None) -> str | None:
+        items = self.invoice.items
+        sku = items[line].sku if line is not None and 0 <= line < len(items) else None
+        return sku.casefold() if sku else None
+
+    def classify(self, code: FindingCode, line: int | None, path: str) -> str | GuardrailCause:
+        """`"relevant"`, `"self"`, `"neutral"`, or the GuardrailCause that refuses the path."""
+        parts = path.split(".")
+        if parts[0] in _SELF_ROOTS:
+            return "self"
+        if parts[0] == "tool":
+            return self._tool(code, line, self.tool_calls[int(parts[1])], parts[2:])
+        if parts[0] == "vendor_history":
+            return self._history(parts[1:], self.case_file.vendor_history)
+        if parts[0] == "vendor_history_total":
+            return "relevant"
+        if parts[:2] == ["invoice", "items"]:
+            index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+            if index is None or line is None:
+                return "neutral"
+            return "relevant" if index == line else GuardrailCause.CROSS_LINE_EVIDENCE
+        if parts[:2] == ["invoice", "vendor"]:
+            return "relevant" if code is FindingCode.VENDOR_UNKNOWN else "neutral"
+        if parts[:2] == ["invoice", "currency"]:
+            return "relevant" if code is FindingCode.CURRENCY_NON_USD else "neutral"
+        if parts[0] == "references" and len(parts) > 1:
+            return self._reference(code, line, parts[1:])
+        return "neutral"
+
+    def _reference(self, code, line, parts) -> str | GuardrailCause:
+        table, key = parts[0], parts[1] if len(parts) > 1 else None
+        if table in _SKU_TABLES and key is not None:
+            if line is None:
+                return "neutral"
+            same = key.casefold() == self.line_sku(line)
+            return "relevant" if same else GuardrailCause.CROSS_LINE_EVIDENCE
+        if table == "price_deviations" and key is not None:
+            if line is None:
+                return "neutral"
+            return "relevant" if key == str(line) else GuardrailCause.CROSS_LINE_EVIDENCE
+        if table == "price_tolerance":
+            return "relevant" if code is FindingCode.PRICE_DEVIATION else "neutral"
+        if table == "usd_equivalent":
+            return "relevant" if code is FindingCode.CURRENCY_NON_USD else "neutral"
+        return "neutral"
+
+    def _history(self, parts, entries) -> str | GuardrailCause:
+        if parts and parts[0].isdigit() and int(parts[0]) < len(entries):
+            if entries[int(parts[0])].currency != self.currency:
+                return GuardrailCause.WRONG_HISTORY_CURRENCY
+        return "relevant"
+
+    def _tool(self, code, line, call: ToolCall, parts) -> str | GuardrailCause:
+        args = call.arguments
+        if call.name == "get_vendor_history":
+            if vendor_key(str(args.get("vendor_key", ""))) != self.vendor:
+                return GuardrailCause.CROSS_VENDOR_EVIDENCE
+            if parts[:2] == ["result", "entries"] and len(parts) > 2 and parts[2].isdigit():
+                entries = (call.result or {}).get("entries") or []
+                index = int(parts[2])
+                if index < len(entries) and entries[index].get("currency") != self.currency:
+                    return GuardrailCause.WRONG_HISTORY_CURRENCY
+            return "relevant"
+        if line is None:
+            return "neutral"
+        if call.name == "get_invoice_line":
+            return "relevant" if args.get("n") == line else GuardrailCause.CROSS_LINE_EVIDENCE
+        same = str(args.get("sku", "")).casefold() == self.line_sku(line)
+        return "relevant" if same else GuardrailCause.CROSS_LINE_EVIDENCE
+
+
+def check_assessments(
+    case_file: CaseFile, assessments: list[WarningAssessment], tool_calls: list[ToolCall]
+) -> list[GuardrailFailure]:
+    """The pure evidence guardrail: one grounded, explained assessment per Warning, or named causes.
+
+    Only `UNEXPLAINED` (the Assessor says the Warning is not explained) is final; every other
+    cause is correctable. Order is deterministic: wrong, missing, then per-assessment causes.
+    """
+    wanted = list(dict.fromkeys((f.code, f.line) for f in _of(case_file, Severity.WARNING)))
+    failures, by_key = [], {}
+    for a in assessments:
+        key = (a.code, a.line)
+        if key not in wanted or key in by_key:
+            why = "duplicate" if key in by_key else "not a Warning of this invoice"
+            failures.append(
+                _failure(GuardrailCause.WRONG_ASSESSMENT, _label(*key), f"assessment is {why}")
+            )
+        else:
+            by_key[key] = a
+    for key in wanted:
+        if key not in by_key:
+            failures.append(
+                _failure(GuardrailCause.MISSING_ASSESSMENT, _label(*key), "no assessment given")
+            )
+    root = case_file.model_dump(mode="json")
+    judge = _Evidence(case_file, tool_calls)
+    for key in wanted:
+        if key in by_key:
+            failures += _check_one(judge, root, tool_calls, by_key[key])
+    return failures
+
+
+def _label(code: FindingCode, line: int | None) -> str:
+    return f"{code}" + (f" line {line}" if line is not None else "")
+
+
+def _check_one(judge: _Evidence, root: dict, tool_calls, a: WarningAssessment):
+    where = _label(a.code, a.line)
+    if not a.explained:
+        return [
+            _failure(
+                GuardrailCause.UNEXPLAINED,
+                where,
+                "the Assessor could not explain this Warning",
+                correctable=False,
+            )
+        ]
+    if not a.evidence:
+        return [
+            _failure(GuardrailCause.EMPTY_EVIDENCE, where, "an explained Warning needs evidence")
+        ]
+    failures, relevant, selfish = [], 0, 0
+    for path in a.evidence:
+        try:
+            resolve_path(root, tool_calls, path)
+        except MalformedPath as exc:
+            failures.append(_failure(GuardrailCause.MALFORMED_PATH, where, str(exc)))
+            continue
+        except UnresolvedPath as exc:
+            failures.append(_failure(GuardrailCause.UNRESOLVED_EVIDENCE, where, str(exc)))
+            continue
+        verdict = judge.classify(a.code, a.line, path)
+        if isinstance(verdict, GuardrailCause):
+            failures.append(_failure(verdict, where, f"evidence {path!r} does not belong here"))
+        elif verdict == "relevant":
+            relevant += 1
+        elif verdict == "self":
+            selfish += 1
+    if not failures and not relevant:
+        cause = GuardrailCause.SELF_EVIDENCE if selfish else GuardrailCause.IRRELEVANT_EVIDENCE
+        failures.append(_failure(cause, where, "no evidence supports this Warning's explanation"))
+    return failures
