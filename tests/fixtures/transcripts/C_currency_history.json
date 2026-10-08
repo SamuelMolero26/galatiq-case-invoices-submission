@@ -1,0 +1,40 @@
+{
+  "id": "C",
+  "title": "non-USD invoice, vendor invoiced in EUR before",
+  "role": "gate",
+  "case_file": "C_currency",
+  "script": [
+    {
+      "content": {
+        "verdict": "concur",
+        "rationale": "The vendor has invoiced in EUR before.",
+        "assessments": [
+          {
+            "code": "CURRENCY_NON_USD",
+            "line": null,
+            "explained": true,
+            "evidence": [
+              "vendor_history[1].currency"
+            ],
+            "rationale": "INV-1995 was invoiced in EUR."
+          }
+        ]
+      }
+    },
+    {
+      "content": {
+        "checks": [
+          {
+            "code": "CURRENCY_NON_USD",
+            "line": null,
+            "holds": true,
+            "reason": "vendor_history[1] is an EUR invoice."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "approved"
+  }
+}

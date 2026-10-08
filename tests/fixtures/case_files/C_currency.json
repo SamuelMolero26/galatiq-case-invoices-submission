@@ -1,0 +1,89 @@
+{
+  "invoice": {
+    "invoice_number": "INV-2003",
+    "vendor": "Acme Supplies",
+    "revision": null,
+    "invoice_date": "2026-01-15",
+    "due_date_text": null,
+    "payment_terms": null,
+    "currency": "EUR",
+    "items": [
+      {
+        "raw_name": "WidgetA",
+        "sku": "WidgetA",
+        "raw_quantity": "2",
+        "quantity": "2",
+        "unit_price": "250.00",
+        "line_total": "500.00",
+        "note": null
+      }
+    ],
+    "subtotal": "500.00",
+    "tax": null,
+    "shipping": null,
+    "total": "500.00",
+    "notes": null,
+    "po_reference": null,
+    "source_path": "constructed.txt",
+    "source_format": "txt",
+    "extracted_fields": []
+  },
+  "findings": [
+    {
+      "code": "CURRENCY_NON_USD",
+      "severity": "warning",
+      "detail": "invoice currency is EUR",
+      "line": null
+    }
+  ],
+  "arrival": {
+    "kind": "new",
+    "duplicate_of": null,
+    "paid_to_date": null,
+    "claimed_state": "paid",
+    "amount_due": "500.00"
+  },
+  "decision_context": [],
+  "checklist": {
+    "CURRENCY_NON_USD": [
+      "Has this vendor invoiced in this currency before, per the vendor history?"
+    ]
+  },
+  "references": {
+    "reference_prices": {
+      "WidgetA": "250"
+    },
+    "stock_levels": {
+      "WidgetA": "15"
+    },
+    "aggregated_quantities": {
+      "WidgetA": "2"
+    },
+    "price_tolerance": "0.15",
+    "price_deviations": {},
+    "usd_equivalent": {
+      "amount": "567.00",
+      "rate": "1.08",
+      "as_of": "2026-01-02",
+      "buffer": "0.05"
+    },
+    "heightened_scrutiny_line": "10000"
+  },
+  "vendor_history": [
+    {
+      "number": "INV-1999",
+      "total": "310.00",
+      "currency": "USD",
+      "state": "paid",
+      "date": "2025-12-18"
+    },
+    {
+      "number": "INV-1995",
+      "total": "900.00",
+      "currency": "EUR",
+      "state": "paid",
+      "date": "2025-12-05"
+    }
+  ],
+  "vendor_history_total": 2
+}

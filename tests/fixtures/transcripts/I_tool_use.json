@@ -1,0 +1,69 @@
+{
+  "id": "I",
+  "title": "no inline history: the Assessor must look it up",
+  "role": "gate",
+  "case_file": "I_no_history",
+  "ledger_history": [
+    {
+      "number": "INV-1999",
+      "total": "310.00",
+      "currency": "USD",
+      "date": "2025-12-18"
+    },
+    {
+      "number": "INV-1995",
+      "total": "900.00",
+      "currency": "EUR",
+      "date": "2025-12-05"
+    },
+    {
+      "number": "INV-1990",
+      "total": "500.00",
+      "currency": "USD",
+      "date": "2025-12-03"
+    }
+  ],
+  "script": [
+    {
+      "tool_calls": [
+        {
+          "name": "get_vendor_history",
+          "arguments": "{\"vendor_key\": \"acme supplies\"}"
+        }
+      ]
+    },
+    {
+      "content": {
+        "verdict": "concur",
+        "rationale": "The vendor invoiced in EUR before (tool history).",
+        "assessments": [
+          {
+            "code": "CURRENCY_NON_USD",
+            "line": null,
+            "explained": true,
+            "evidence": [
+              "tools[0].result.entries[1].currency"
+            ],
+            "rationale": "Entry 1 is EUR."
+          }
+        ]
+      }
+    },
+    {
+      "content": {
+        "checks": [
+          {
+            "code": "CURRENCY_NON_USD",
+            "line": null,
+            "holds": true,
+            "reason": "tools[0] entry 1 is an EUR invoice."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "approved",
+    "tool_cited": true
+  }
+}

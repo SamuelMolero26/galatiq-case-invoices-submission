@@ -1,0 +1,72 @@
+{
+  "id": "H",
+  "title": "correction round after a false claim",
+  "role": "correction",
+  "case_file": "A_price_note",
+  "planted_attempt": {
+    "verdict": "concur",
+    "rationale": "The price is within tolerance and the line note says rush order.",
+    "assessments": [
+      {
+        "code": "PRICE_DEVIATION",
+        "line": 0,
+        "explained": true,
+        "evidence": [
+          "invoice.items[0].note"
+        ],
+        "rationale": "300 is within 15% of 250, and the line note says 'rush order'."
+      }
+    ]
+  },
+  "feedback_fallback": [
+    "300 is 20% above 250, outside the 15% tolerance; it is not within 15%."
+  ],
+  "script": [
+    {
+      "content": {
+        "checks": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "holds": false,
+            "reason": "300 is 20% above 250, outside the 15% tolerance; it is not within 15%."
+          }
+        ]
+      }
+    },
+    {
+      "content": {
+        "verdict": "concur",
+        "rationale": "A 20% premium explained by the noted rush order.",
+        "assessments": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "explained": true,
+            "evidence": [
+              "invoice.items[0].note"
+            ],
+            "rationale": "A 20% premium over 250, explained by the line note 'rush order'."
+          }
+        ]
+      }
+    },
+    {
+      "content": {
+        "checks": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "holds": true,
+            "reason": "The note exists and the deviation is 20%, as stated."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "approved",
+    "correction_ran": true,
+    "verifier_passes": 2
+  }
+}

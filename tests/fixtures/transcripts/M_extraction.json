@@ -1,0 +1,22 @@
+{
+  "id": "M",
+  "title": "extraction fallback for a missing total",
+  "role": "extraction",
+  "missing": [
+    "total"
+  ],
+  "raw_text": "Fwd: invoice from Acme Supplies\n\nHi team, INV-2007 attached. 2 x WidgetB @ 500.00, 3 x GadgetX @ 750.00, shipping 150.00 and tax 700.00.\nPlease remit four thousand one hundred dollars, i.e. 4,100.00, by month end.\nThanks, Sam",
+  "script": [
+    {
+      "content": {
+        "total": "4100.00"
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "supplied",
+    "supplied": {
+      "total": "4100.00"
+    }
+  }
+}

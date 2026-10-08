@@ -1,0 +1,41 @@
+{
+  "id": "F",
+  "title": "two Warnings, only one explained",
+  "role": "gate",
+  "case_file": "F_two_warnings",
+  "script": [
+    {
+      "content": {
+        "verdict": "escalate",
+        "rationale": "Line 0 is explained; line 1 has no explanation.",
+        "assessments": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "explained": true,
+            "evidence": [
+              "invoice.items[0].note"
+            ],
+            "rationale": "Line 0 is noted 'rush order'."
+          },
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 1,
+            "explained": false,
+            "evidence": [],
+            "rationale": "Nothing explains the premium on line 1."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "needs_review",
+    "unexplained": [
+      [
+        "PRICE_DEVIATION",
+        1
+      ]
+    ]
+  }
+}

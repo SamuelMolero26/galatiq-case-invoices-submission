@@ -1,0 +1,56 @@
+{
+  "id": "J",
+  "title": "a planted citation that exists but does not explain",
+  "role": "gate",
+  "case_file": "A_price_note",
+  "planted_try": {
+    "verdict": "concur",
+    "rationale": "The unit price is 300.00.",
+    "assessments": [
+      {
+        "code": "PRICE_DEVIATION",
+        "line": 0,
+        "explained": true,
+        "evidence": [
+          "invoice.items[0].unit_price"
+        ],
+        "rationale": "The unit price is 300.00."
+      }
+    ]
+  },
+  "script": [
+    {
+      "content": {
+        "verdict": "concur",
+        "rationale": "The 20% premium over the 250.00 reference is explained by the line note 'rush order'.",
+        "assessments": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "explained": true,
+            "evidence": [
+              "invoice.items[0].note"
+            ],
+            "rationale": "Line 0 is noted 'rush order'; the Case File states a 20% deviation."
+          }
+        ]
+      }
+    },
+    {
+      "content": {
+        "checks": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "holds": true,
+            "reason": "The note exists and the deviation is 20%, as stated."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "approved",
+    "tries": 2
+  }
+}

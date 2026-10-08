@@ -1,0 +1,83 @@
+{
+  "invoice": {
+    "invoice_number": "INV-2006",
+    "vendor": "Acme Supplies",
+    "revision": null,
+    "invoice_date": "2026-01-15",
+    "due_date_text": null,
+    "payment_terms": null,
+    "currency": "USD",
+    "items": [
+      {
+        "raw_name": "WidgetA",
+        "sku": "WidgetA",
+        "raw_quantity": "20",
+        "quantity": "20",
+        "unit_price": "250.00",
+        "line_total": "5000.00",
+        "note": null
+      }
+    ],
+    "subtotal": "5000.00",
+    "tax": null,
+    "shipping": null,
+    "total": "5000.00",
+    "notes": null,
+    "po_reference": null,
+    "source_path": "constructed.txt",
+    "source_format": "txt",
+    "extracted_fields": []
+  },
+  "findings": [
+    {
+      "code": "STOCK_SHORTAGE",
+      "severity": "review_trigger",
+      "detail": "item 'WidgetA': aggregate quantity 20 exceeds Stock Level 15",
+      "line": null
+    }
+  ],
+  "arrival": {
+    "kind": "new",
+    "duplicate_of": null,
+    "paid_to_date": null,
+    "claimed_state": "paid",
+    "amount_due": "5000.00"
+  },
+  "decision_context": [
+    "precedence row 3: Review Trigger",
+    "STOCK_SHORTAGE: item 'WidgetA': aggregate quantity 20 exceeds Stock Level 15"
+  ],
+  "checklist": {},
+  "references": {
+    "reference_prices": {
+      "WidgetA": "250"
+    },
+    "stock_levels": {
+      "WidgetA": "15"
+    },
+    "aggregated_quantities": {
+      "WidgetA": "20"
+    },
+    "price_tolerance": "0.15",
+    "price_deviations": {},
+    "usd_equivalent": null,
+    "heightened_scrutiny_line": "10000"
+  },
+  "vendor_history": [
+    {
+      "number": "INV-1998",
+      "total": "250.00",
+      "currency": "USD",
+      "state": "paid",
+      "date": "2025-12-20"
+    },
+    {
+      "number": "INV-1990",
+      "total": "500.00",
+      "currency": "USD",
+      "state": "paid",
+      "date": "2025-12-03"
+    }
+  ],
+  "vendor_history_total": 2
+}

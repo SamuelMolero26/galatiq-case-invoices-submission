@@ -1,0 +1,40 @@
+{
+  "id": "A",
+  "title": "explainable price deviation",
+  "role": "gate",
+  "case_file": "A_price_note",
+  "script": [
+    {
+      "content": {
+        "verdict": "concur",
+        "rationale": "The 20% premium over the 250.00 reference is explained by the line note 'rush order'.",
+        "assessments": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "explained": true,
+            "evidence": [
+              "invoice.items[0].note"
+            ],
+            "rationale": "Line 0 is noted 'rush order'; the Case File states a 20% deviation."
+          }
+        ]
+      }
+    },
+    {
+      "content": {
+        "checks": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "holds": true,
+            "reason": "The note exists and the deviation is 20%, as stated."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "approved"
+  }
+}

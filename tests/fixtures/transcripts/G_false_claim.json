@@ -1,0 +1,41 @@
+{
+  "id": "G",
+  "title": "Verifier fed a planted false claim",
+  "role": "verifier",
+  "case_file": "A_price_note",
+  "planted_attempt": {
+    "verdict": "concur",
+    "rationale": "The price is within tolerance and the line note says rush order.",
+    "assessments": [
+      {
+        "code": "PRICE_DEVIATION",
+        "line": 0,
+        "explained": true,
+        "evidence": [
+          "invoice.items[0].note"
+        ],
+        "rationale": "300 is within 15% of 250, and the line note says 'rush order'."
+      }
+    ]
+  },
+  "script": [
+    {
+      "content": {
+        "checks": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "holds": false,
+            "reason": "300 is 20% above 250, outside the 15% tolerance; it is not within 15%."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "needs_review",
+    "holds": [
+      false
+    ]
+  }
+}

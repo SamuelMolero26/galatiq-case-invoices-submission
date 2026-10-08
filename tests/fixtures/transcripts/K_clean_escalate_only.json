@@ -1,0 +1,17 @@
+{
+  "id": "K",
+  "title": "clean invoice, escalate-only review",
+  "role": "escalate",
+  "case_file": "K_clean",
+  "script": [
+    {
+      "content": {
+        "verdict": "concur",
+        "rationale": "Matches this vendor's prior orders."
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "approved"
+  }
+}

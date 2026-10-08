@@ -1,0 +1,32 @@
+{
+  "id": "B",
+  "title": "price deviation with no note and no history",
+  "role": "gate",
+  "case_file": "B_price_no_note",
+  "script": [
+    {
+      "content": {
+        "verdict": "escalate",
+        "rationale": "Nothing in the Case File explains the 20% premium.",
+        "assessments": [
+          {
+            "code": "PRICE_DEVIATION",
+            "line": 0,
+            "explained": false,
+            "evidence": [],
+            "rationale": "No note on the line or the invoice and no vendor history."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "needs_review",
+    "unexplained": [
+      [
+        "PRICE_DEVIATION",
+        0
+      ]
+    ]
+  }
+}

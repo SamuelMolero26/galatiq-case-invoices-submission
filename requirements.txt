@@ -1,0 +1,5 @@
+# Production dependencies (pinned from verified spikes).
+# Spike-only packages (tiktoken, toon-format, pymupdf, uv-build) are NOT listed:
+# measure only, never ship.
+pdfplumber==0.11.10
+pydantic==2.12.5

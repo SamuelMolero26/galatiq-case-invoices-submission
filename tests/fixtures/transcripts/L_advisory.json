@@ -1,0 +1,18 @@
+{
+  "id": "L",
+  "title": "advisory reasoning on a stock shortage",
+  "role": "advisory",
+  "case_file": "L_stock_shortage",
+  "script": [
+    {
+      "content": {
+        "explanation": "Quantity 20 of WidgetA exceeds the Stock Level of 15, so the shortage needs a human decision.",
+        "recommendation": "investigate"
+      }
+    }
+  ],
+  "expected": {
+    "outcome": "advisory",
+    "names_shortage": true
+  }
+}
