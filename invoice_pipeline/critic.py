@@ -70,11 +70,12 @@ def offline_agents() -> Agents:
     )
 
 
-def _is_case_file_path(case_file: CaseFile, path: str) -> bool:
-    """Whether dotted `path` resolves inside this Case File.
+def _is_case_file_path(case_file: BaseModel, path: str) -> bool:
+    """Whether dotted `path` names a concrete value inside this Case File.
 
     Models resolve by field name, lists by index, dicts by key; a scalar with a
-    further segment, or any unknown segment, is not in the Case File.
+    further segment, or any unknown segment, is not in the Case File. A path that
+    ends on a whole record (a model) or on a null is not evidence of anything.
     """
     node: Any = case_file
     for part in path.split("."):
@@ -94,7 +95,7 @@ def _is_case_file_path(case_file: CaseFile, path: str) -> bool:
             node = node[int(part)]
         else:
             return False
-    return True
+    return node is not None and not isinstance(node, BaseModel)
 
 
 def _validate_escalate(case_file: CaseFile):
@@ -120,7 +121,10 @@ def _validate_escalate(case_file: CaseFile):
             )
         for path in evidence:
             if not _is_case_file_path(case_file, path):
-                return CorrectableError(f"evidence path {path!r} is not in the Case File")
+                return CorrectableError(
+                    f"evidence path {path!r} must name a non-null field of the Case File, "
+                    "not a whole record"
+                )
         if not isinstance(data.get("rationale"), str) or not data["rationale"].strip():
             return CorrectableError("field 'rationale' must be a non-empty string")
         return data
