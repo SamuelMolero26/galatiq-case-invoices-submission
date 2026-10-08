@@ -202,14 +202,21 @@ class _Evidence:
         if parts[0] == "tool":
             return self._tool(code, line, self.tool_calls[int(parts[1])], parts[2:])
         if parts[0] == "vendor_history":
-            return self._history(parts[1:], self.case_file.vendor_history)
+            verdict = self._history(parts[1:], self.case_file.vendor_history)
+            if isinstance(verdict, GuardrailCause):
+                return verdict
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else verdict
         if parts[0] == "vendor_history_total":
-            return "relevant"
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else "relevant"
         if parts[:2] == ["invoice", "items"]:
             index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
             if index is None or line is None:
                 return "neutral"
-            return "relevant" if index == line else GuardrailCause.CROSS_LINE_EVIDENCE
+            if index != line:
+                return GuardrailCause.CROSS_LINE_EVIDENCE
+            if code is FindingCode.PRICE_DEVIATION:
+                return "relevant" if parts[3:] == ["unit_price"] else "neutral"
+            return "relevant"
         if parts[:2] == ["invoice", "vendor"]:
             return "relevant" if code is FindingCode.VENDOR_UNKNOWN else "neutral"
         if parts[:2] == ["invoice", "currency"]:
@@ -224,13 +231,17 @@ class _Evidence:
             if line is None:
                 return "neutral"
             same = key.casefold() == self.line_sku(line)
-            return "relevant" if same else GuardrailCause.CROSS_LINE_EVIDENCE
+            if not same:
+                return GuardrailCause.CROSS_LINE_EVIDENCE
+            if code is FindingCode.PRICE_DEVIATION and table != "reference_prices":
+                return "neutral"
+            return "relevant"
         if table == "price_deviations" and key is not None:
             if line is None:
                 return "neutral"
             return "relevant" if key == str(line) else GuardrailCause.CROSS_LINE_EVIDENCE
         if table == "price_tolerance":
-            return "relevant" if code is FindingCode.PRICE_DEVIATION else "neutral"
+            return "neutral"
         if table == "usd_equivalent":
             return "relevant" if code is FindingCode.CURRENCY_NON_USD else "neutral"
         return "neutral"
@@ -251,13 +262,21 @@ class _Evidence:
                 index = int(parts[2])
                 if index < len(entries) and entries[index].get("currency") != self.currency:
                     return GuardrailCause.WRONG_HISTORY_CURRENCY
-            return "relevant"
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else "relevant"
         if line is None:
             return "neutral"
         if call.name == "get_invoice_line":
-            return "relevant" if args.get("n") == line else GuardrailCause.CROSS_LINE_EVIDENCE
+            if args.get("n") != line:
+                return GuardrailCause.CROSS_LINE_EVIDENCE
+            return "neutral" if code is FindingCode.PRICE_DEVIATION else "relevant"
         same = str(args.get("sku", "")).casefold() == self.line_sku(line)
-        return "relevant" if same else GuardrailCause.CROSS_LINE_EVIDENCE
+        if not same:
+            return GuardrailCause.CROSS_LINE_EVIDENCE
+        if code is FindingCode.PRICE_DEVIATION:
+            result = call.result or {}
+            is_price = call.name == "get_reference_price" and parts == ["result", "unit_price"]
+            return "relevant" if is_price and result.get("found") is True else "neutral"
+        return "relevant"
 
 
 def check_assessments(
