@@ -5,6 +5,7 @@ Orchestration only: every rule lives in ingestion, validation, approval, ledger 
 
 import json
 import logging
+import os
 import sqlite3
 from collections import Counter
 from collections.abc import Callable
@@ -17,7 +18,8 @@ from pathlib import Path
 from invoice_pipeline import catalog, ingestion, ledger, payment
 from invoice_pipeline.approval import decide, decide_unreadable
 from invoice_pipeline.catalog import Catalog, CatalogError
-from invoice_pipeline.critic import build_case_file, offline_agents
+from invoice_pipeline.critic import build_case_file, offline_agents, online_agents
+from invoice_pipeline.llm import ConfigError, select_tier
 from invoice_pipeline.model import Agents, Event, FindingCode, Ingested, QueueItem, vendor_key
 from invoice_pipeline.validation import validate
 
@@ -247,10 +249,11 @@ def ledger_path_of(args) -> Path:
 
 
 def bootstrap(args) -> Runtime:
-    """Seed a missing inventory, check both schemas, and select the tier (offline only so far)."""
-    tier = args.llm or "offline"
-    if tier != "offline":
-        raise BootstrapError(f"LLM tier {tier!r} is not available yet; use --llm offline")
+    """Seed a missing inventory, check both schemas, and select the tier via select_tier."""
+    try:
+        tier_cfg = select_tier(getattr(args, "llm", None), os.environ)
+    except ConfigError as exc:
+        raise BootstrapError(str(exc)) from exc
     inventory = Path(args.inventory or catalog.DEFAULT_INVENTORY_PATH)
     ledger_path = ledger_path_of(args)
     try:
@@ -260,7 +263,8 @@ def bootstrap(args) -> Runtime:
         ledger.connect(ledger_path).close()
     except (CatalogError, ledger.LedgerError, sqlite3.Error, OSError) as exc:
         raise BootstrapError(str(exc)) from exc
-    return Runtime(catalog=loaded, ledger_path=ledger_path, tier=tier)
+    agents = online_agents(tier_cfg) if tier_cfg.tier == "grok" else offline_agents()
+    return Runtime(catalog=loaded, ledger_path=ledger_path, tier=tier_cfg.tier, agents=agents)
 
 
 def collect_files(path: Path | str) -> list[Path]:
