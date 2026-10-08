@@ -35,6 +35,7 @@ class Doc(BaseModel):
     total: int
     po_number: str | None = None
     lines: list[Line]
+    prices: dict[str, int] = {}
 
 
 class Case(BaseModel):
@@ -42,24 +43,31 @@ class Case(BaseModel):
     findings: list[str]
 
 
-CASE = Case(invoice=Doc(total=10, lines=[Line(sku="A")]), findings=[])
+CASE = Case(invoice=Doc(total=10, lines=[Line(sku="A")], prices={"A": 1}), findings=[])
 
 
 def test_scalar_and_list_values_are_evidence():
-    for path in ("invoice.total", "invoice.lines.0.sku", "findings", "invoice.lines"):
+    for path in (
+        "invoice.total",
+        "invoice.lines.0.sku",
+        "findings",
+        "invoice.lines",
+        "invoice.prices.A",
+    ):
         assert _is_case_file_path(CASE, path), path
 
 
 def test_whole_records_nulls_and_unknown_paths_are_not_evidence():
-    for path in ("invoice", "invoice.lines.0", "invoice.po_number", "invoice.po", "", "x.y"):
+    for path in (
+        "invoice",
+        "invoice.lines.0",
+        "invoice.prices",
+        "invoice.po_number",
+        "invoice.po",
+        "",
+        "x.y",
+    ):
         assert not _is_case_file_path(CASE, path), path
-
-
-def test_dict_records_are_not_evidence_but_their_leaves_are():
-    view = {"references": {"price_deviations": {}, "reference_prices": {"WidgetA": 250}}}
-    assert not _is_case_file_path(view, "references.price_deviations")
-    assert not _is_case_file_path(view, "references.reference_prices")
-    assert _is_case_file_path(view, "references.reference_prices.WidgetA")
 
 
 def _price_case() -> CaseFile:

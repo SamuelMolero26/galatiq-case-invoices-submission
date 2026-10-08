@@ -30,16 +30,9 @@ def _outcomes(batch):
     ]
 
 
-def test_concurrent_batch_matches_sequential(tmp_path):
+def test_concurrent_batch_matches_sequential_and_reports_each_file_once(tmp_path):
     paths = service.collect_files(SAMPLE_INVOICES)
     sequential = service.run_batch(paths, _runtime(tmp_path, "seq"))
-    concurrent = service.run_batch(paths, _runtime(tmp_path, "par"), workers=4)
-    assert not concurrent.failed
-    assert _outcomes(concurrent) == _outcomes(sequential)
-
-
-def test_concurrent_batch_reports_each_file_once(tmp_path):
-    paths = service.collect_files(SAMPLE_INVOICES)
     started, done, lock = [], [], threading.Lock()
 
     def on_start(name):
@@ -50,12 +43,14 @@ def test_concurrent_batch_reports_each_file_once(tmp_path):
         with lock:
             done.append(name)
 
-    service.run_batch(
-        paths, _runtime(tmp_path, "cb"), workers=4, on_start=on_start, on_done=on_done
+    concurrent = service.run_batch(
+        paths, _runtime(tmp_path, "par"), workers=4, on_start=on_start, on_done=on_done
     )
+
+    assert not concurrent.failed
+    assert _outcomes(concurrent) == _outcomes(sequential)
     names = sorted(p.name for p in paths)
-    assert sorted(started) == names
-    assert sorted(done) == names
+    assert sorted(started) == names and sorted(done) == names
 
 
 def test_default_workers_reads_the_environment(monkeypatch):
