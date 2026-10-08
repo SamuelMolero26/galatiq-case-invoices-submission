@@ -168,7 +168,7 @@ def _run_tui(args) -> int:
             raise
         _error(TUI_EXTRA)
         return EXIT_FAILED
-    return tui.run(ledger_path)
+    return tui.run(ledger_path, args)
 
 
 def main(argv: list[str] | None = None, out=None) -> int:
