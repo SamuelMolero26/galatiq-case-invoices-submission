@@ -135,10 +135,13 @@ def arrival_result(conn, arrival_id: int) -> ArrivalResult:
     record = json.loads(row["record"])
     decision = record["decision"]
     notes = "none"
-    for role in ("escalate_review", "advisory"):
-        if call := decision.get(role):
-            notes = "offline tier" if call["tier"] == "offline" else role
-            break
+    if decision.get("critic") is not None:
+        notes = "critic"
+    else:
+        for role in ("escalate_review", "advisory"):
+            if call := decision.get(role):
+                notes = "offline tier" if call["tier"] == "offline" else role
+                break
     return ArrivalResult(
         arrival_id=arrival_id,
         source=row["source"],

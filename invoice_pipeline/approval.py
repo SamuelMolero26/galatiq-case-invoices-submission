@@ -130,6 +130,14 @@ def decide(case_file: CaseFile, agents: Agents) -> Decision:
 _SEGMENT = re.compile(r"[A-Za-z0-9_-]+")
 _SELF_ROOTS = {"findings", "checklist", "decision_context"}
 _SKU_TABLES = {"reference_prices", "stock_levels", "aggregated_quantities"}
+_LINE_ITEM_EVIDENCE_FIELDS = {
+    "raw_name",
+    "sku",
+    "raw_quantity",
+    "quantity",
+    "unit_price",
+    "line_total",
+}
 
 
 class PathError(ValueError):
@@ -206,6 +214,9 @@ class _Evidence:
         if parts[0] == "vendor_history_total":
             return "relevant"
         if parts[:2] == ["invoice", "items"]:
+            field = parts[3] if len(parts) == 4 else None
+            if field not in _LINE_ITEM_EVIDENCE_FIELDS:
+                return "neutral"
             index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
             if index is None or line is None:
                 return "neutral"
