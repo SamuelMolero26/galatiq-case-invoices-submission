@@ -81,14 +81,6 @@ RESOLVED = {"approve": "approved", "reject": "rejected"}
 VIEW_STATUS = {"approved": GREEN, "rejected": RED, "needs_review": AMBER}
 
 
-def render_detail(detail: ArrivalDetail) -> RenderableType:
-    """The detail pane for one arrival: badge, scrutiny, pipeline, amount, notes, findings."""
-    parts = _summary(detail)
-    if (chips := _chips(detail)) is not None:
-        parts += [Text(), chips]
-    return Group(*parts)
-
-
 def _summary(detail: ArrivalDetail) -> list[RenderableType]:
     """Everything above the action buttons: badge, scrutiny, pipeline, amount, agent notes."""
     glyph, colour, badge = STATE_MARK[detail.state]

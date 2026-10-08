@@ -13,7 +13,8 @@ import pytest
 pytest.importorskip("textual")
 
 from conftest import Harness, text_reply  # noqa: E402
-from rich.console import Console  # noqa: E402
+from rich.console import Console, Group  # noqa: E402
+from rich.text import Text  # noqa: E402
 
 from invoice_pipeline import ledger, service, tui  # noqa: E402
 
@@ -35,6 +36,11 @@ def plain(renderable, width=140) -> str:
     console = Console(file=io.StringIO(), width=width, record=True, color_system=None)
     console.print(renderable)
     return console.export_text()
+
+
+def render_detail(detail) -> Group:
+    chips = tui._chips(detail)
+    return Group(*tui._summary(detail), *([Text(), chips] if chips is not None else []))
 
 
 def _states(ledger_path) -> Counter:
@@ -136,7 +142,7 @@ def test_needs_review_detail_shows_the_eur_usd_evidence(batch_ledger):
 def test_rejected_detail_shows_stages_and_finding_chips(batch_ledger):
     detail = service.arrival_detail(batch_ledger, 10)  # invoice_1009.json
 
-    text = plain(tui.render_detail(detail))
+    text = plain(render_detail(detail))
 
     assert detail.source == "invoice_1009.json" and "✗ REJECTED" in text
     assert "scrutiny standard" in text
@@ -154,7 +160,7 @@ def test_model_notes_are_labeled_and_rule_notes_are_not(tmp_path, grok):
     h = Harness(tmp_path, grok, advice)
     result = h.process("eur.json", EUR_SHORTAGE)
 
-    lines = plain(tui.render_detail(service.arrival_detail(h.ledger_path, result.arrival_id)))
+    lines = plain(render_detail(service.arrival_detail(h.ledger_path, result.arrival_id)))
     lines = lines.splitlines()
 
     advisory = next(line for line in lines if "explained for the reviewer" in line)
