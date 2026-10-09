@@ -84,7 +84,6 @@ ACTIONS = (  # (action, key, label, colour), in `ArrivalDetail.actions` order
 )
 ACTION_KEY = {action: (key, label) for action, key, label, _ in ACTIONS}
 RESOLVED = {"approve": "approved", "reject": "rejected"}
-VIEW_STATUS = {"approved": GREEN, "rejected": RED, "needs_review": AMBER}
 
 
 def _summary(detail: ArrivalDetail) -> list[RenderableType]:
@@ -952,8 +951,7 @@ class InvoiceApp(App):
 
 def _outcome(verb: str, result: ArrivalResult) -> tuple[str, str]:
     state = result.state.replace("_", " ")
-    bucket = {"paid": "approved", "logged_rejection": "rejected"}.get(result.state, "needs_review")
-    return f"{verb} arrival #{result.arrival_id} · now {state}", VIEW_STATUS[bucket]
+    return f"{verb} arrival #{result.arrival_id} · now {state}", STATE_MARK[result.state][1]
 
 
 def run(ledger_path: Path, args: argparse.Namespace | None = None) -> int:

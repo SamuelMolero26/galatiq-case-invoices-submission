@@ -407,12 +407,12 @@ def accept_verdict(
     assessor, verifier = attempt.assessor, attempt.verifier
     if not assessor.accepted:
         if final := [f for f in assessor.failures if not f.correctable]:
-            return Verdict(False, True, False, [_refusal(f) for f in final])
+            return Verdict(False, True, False, [refusal(f) for f in final])
         return Verdict(False, False, False, [assessor.error or "no usable assessment"])
     if failures := check_bounds(case_file):
         return Verdict(False, True, False, failures)
     if guardrail := check_assessments(case_file, assessor.assessments, tool_calls):
-        return Verdict(False, True, False, [_refusal(f) for f in guardrail])
+        return Verdict(False, True, False, [refusal(f) for f in guardrail])
     if verifier is None or not verifier.accepted:
         error = verifier.error if verifier else None
         return Verdict(False, False, False, [error or "no usable Verifier answer"])
@@ -439,7 +439,7 @@ def accept_verdict(
     return Verdict(True, True, False, [])
 
 
-def _refusal(failure: GuardrailFailure) -> str:
+def refusal(failure: GuardrailFailure) -> str:
     return f"{failure.where}: {failure.message} [{failure.cause.value}]"
 
 

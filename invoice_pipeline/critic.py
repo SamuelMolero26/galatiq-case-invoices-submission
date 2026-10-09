@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from invoice_pipeline import extraction
-from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD, check_assessments, label
+from invoice_pipeline.approval import HEIGHTENED_SCRUTINY_USD, check_assessments, label, refusal
 from invoice_pipeline.catalog import Catalog
 from invoice_pipeline.llm import CorrectableError, FinalError, TierConfig, ask, chat, role_call
 from invoice_pipeline.model import (
@@ -156,12 +156,9 @@ def _validate_escalate(case_file: CaseFile):
     view = escalate_view(case_file)
 
     def validate(content: str):
-        try:
-            data = json.loads(content)
-        except ValueError as exc:
-            return CorrectableError(f"answer is not valid JSON: {exc}")
-        if not isinstance(data, dict):
-            return CorrectableError("answer must be a JSON object")
+        data = _validate_advisory(content)  # a JSON object with a rationale
+        if isinstance(data, CorrectableError):
+            return data
         if data.get("verdict") not in ("concur", "escalate"):
             return CorrectableError("field 'verdict' must be one of 'concur', 'escalate'")
         evidence = data.get("evidence")
@@ -180,8 +177,6 @@ def _validate_escalate(case_file: CaseFile):
                 )
         if bad:
             return CorrectableError("evidence paths are not all citable: " + "; ".join(bad))
-        if not isinstance(data.get("rationale"), str) or not data["rationale"].strip():
-            return CorrectableError("field 'rationale' must be a non-empty string")
         return data
 
     return validate
@@ -363,7 +358,7 @@ def parse_verifier(
 
 
 def _guardrail_message(failures: list[GuardrailFailure]) -> str:
-    listed = "; ".join(f"{f.where}: {f.message} [{f.cause.value}]" for f in failures)
+    listed = "; ".join(refusal(f) for f in failures)
     return f"The evidence guardrail refused the answer: {listed}. Resend the full JSON answer."
 
 
