@@ -96,6 +96,18 @@ _ROW_COLUMNS = {
 _IDENTITY = ("invoice_number", "vendor", "date", "due_date", "currency")
 
 
+def _identity_value(key: str, value: str) -> str:
+    """Canonical comparison value for repeated invoice-level CSV metadata."""
+    text = clean_text(value) or ""
+    if key == "invoice_number":
+        return normalize_invoice_number(text) or ""
+    if key == "vendor":
+        return text.casefold()
+    if key == "currency":
+        return text.upper()
+    return text
+
+
 def _footer_label(cell: str) -> str | None:
     """'Subtotal', 'Tax (6%):', 'TOTAL' ... as the footer field name, or None."""
     label = re.sub(r"\(.*?\)|:", "", cell).strip().lower()
@@ -142,11 +154,19 @@ def parse_csv(text: str, source_path: str) -> list[Ingested]:
         if not has_line:
             continue
         if cells.get("invoice_number"):
-            current = cells["invoice_number"]
+            current = normalize_invoice_number(cells["invoice_number"])
         data, lines = groups.setdefault(current, ({}, []))
         for key in _IDENTITY:  # blank cells inherit the identity from the rows above
-            if cells.get(key) and not data.get(key):
-                data[key] = cells[key]
+            value = cells.get(key)
+            if not value:
+                continue
+            existing = data.get(key)
+            if existing and _identity_value(key, existing) != _identity_value(key, value):
+                raise ValueError(
+                    f"conflicting {key} for invoice {current or '<missing>'}: "
+                    f"{existing!r} != {value!r}"
+                )
+            data.setdefault(key, value)
         lines.append(cells)
     if not groups:
         raise ValueError("no CSV line rows")

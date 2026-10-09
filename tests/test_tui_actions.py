@@ -74,7 +74,7 @@ def test_buttons_and_hints_show_only_the_available_actions(rt):
         seen = {}
         await select(pilot, "3", "invoice_1002.txt")  # approvable Needs Review (rule decided)
         seen["approvable"] = buttons(pilot.app), hints(pilot.app)
-        await select(pilot, "3", "invoice_1004_revised.json")  # no payable amount
+        await select(pilot, "3", "invoice_1004_revised.json")  # revision: delta payable
         seen["reject_only"] = buttons(pilot.app), hints(pilot.app)
         await select(pilot, "2", "invoice_1001.txt")  # paid
         seen["paid"] = buttons(pilot.app), hints(pilot.app)
@@ -89,7 +89,7 @@ def test_buttons_and_hints_show_only_the_available_actions(rt):
     assert "a approve & pay" in approvable_hints and "x reject" in approvable_hints
     assert "r retry" not in approvable_hints
     reject_buttons, reject_hints = seen["reject_only"]
-    assert reject_buttons == ["reject"] and "approve" not in reject_hints
+    assert reject_buttons == ["approve", "reject"] and "a approve & pay" in reject_hints
     paid_buttons, paid_hints = seen["paid"]
     assert paid_buttons == [] and "reject" not in paid_hints
     assert seen["screen"] is not tui.ReasonScreen

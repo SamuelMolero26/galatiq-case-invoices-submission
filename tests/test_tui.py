@@ -203,3 +203,17 @@ def test_widgets_never_reach_past_the_service_read_models():
     inside = {id(n) for n in ast.walk(app)}
     uses = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in ("service", "view")]
     assert uses and all(id(n) in inside for n in uses)
+
+
+def test_header_shows_tier_mode():
+    from invoice_pipeline.tui import RunHeader
+
+    header = RunHeader()
+    shown = []
+    header.update = shown.append
+    header.funnel(1, {})
+    off = shown[-1].columns[1]._cells[0].plain
+    header.tier = "grok"
+    header.funnel(1, {})
+    on = shown[-1].columns[1]._cells[0].plain
+    assert "offline" in off and "agents on · grok" in on

@@ -1,8 +1,12 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "invoice-pipeline"
 version = "0.1.0"
 description = "Invoice processing pipeline: Ingestion, Validation, Approval, Payment"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "pdfplumber>=0.11",
     "pydantic>=2.12",
@@ -14,6 +18,14 @@ tui = ["textual==8.2.8"]  # `python main.py tui`; batch and `review --list` neve
 dev = ["pytest>=8", "ruff>=0.8"]
 all = ["invoice-pipeline[tui,dev]"]  # full install: pip install -e ".[all]"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["invoice_pipeline*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+invoice_pipeline = ["*.tcss"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
@@ -23,7 +35,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py312"
 extend-exclude = ["openspec", "data"]
 
 [tool.ruff.lint]

@@ -104,6 +104,14 @@ def test_csv_two_invoice_numbers_become_two_invoices():
     assert second.invoice.total == D("12.00")
 
 
+def test_csv_conflicting_identity_metadata_is_rejected():
+    text = ROW_HEADER + "INV-1,Acme,01/28/2026,02/28/2026,WidgetA,1,10.00,10.00\n"
+    text += "INV-1,Globex,01/28/2026,02/28/2026,WidgetB,1,5.00,5.00\n"
+
+    with pytest.raises(ValueError, match="conflicting vendor"):
+        parse_csv(text, "x.csv")
+
+
 def test_xml_nested_structure_and_eur_metadata_1014():
     result = xml_doc()
     inv = result.invoice

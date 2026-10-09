@@ -87,6 +87,24 @@ def test_a_failing_invoice_keeps_the_other_invoices_of_its_file(tmp_path, monkey
     assert [(f.file, f.stage) for f in batch.failed] == [("three.csv", "validation")]
 
 
+def test_conflicting_csv_identity_fails_closed_without_payment(tmp_path):
+    path = tmp_path / "mixed-vendors.csv"
+    path.write_text(
+        "Invoice Number,Vendor,Item,Qty,Unit Price,Line Total,Currency\n"
+        "INV-X,Widgets Inc.,WidgetA,1,250,250,USD\n"
+        "INV-X,Gadgets Co.,WidgetB,1,500,500,USD\n"
+        ",,TOTAL,,,,750\n"
+    )
+    paid = []
+
+    batch = service.process_path(path, _runtime(tmp_path, pay_fn=lambda *args: paid.append(args)))
+
+    assert paid == [] and batch.failed == []
+    assert len(batch.results) == 1
+    assert batch.results[0].state == "needs_review"
+    assert batch.results[0].finding_codes == ["UNREADABLE_DOCUMENT"]
+
+
 def test_an_interrupted_ledger_initialisation_leaves_nothing_half_made(tmp_path, monkeypatch):
     path = tmp_path / "ledger.db"
     monkeypatch.setattr(ledger, "_SCHEMA", ledger._SCHEMA + "; NOT VALID SQL")

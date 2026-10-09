@@ -136,7 +136,7 @@ def _run_batch(args, ui) -> int:
         return EXIT_FAILED
     rt = dataclasses.replace(rt, on_event=ui.event)
     ui.startup(rt.tier)
-    batch = service.run_batch(service.collect_files(path), rt)
+    batch = service.run_batch(service.collect_files(path), rt, workers=service.default_workers())
     ui.finish(batch)
     for failure in batch.failed:
         _error(str(failure))
