@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from invoice_pipeline.ingestion.normalize import parse_money
-from invoice_pipeline.llm import CorrectableError, TierConfig, ask, chat, role_call
+from invoice_pipeline.llm import Asked, CorrectableError, TierConfig, ask, chat, role_call
 from invoice_pipeline.model import (
     FindingCode,
     Ingested,
@@ -99,14 +99,7 @@ def extract(tier: TierConfig, raw_text: str, fields: list[str], *, chat_fn=chat)
         )
         return role_call("extraction", tier, asked)
     except Exception as exc:
-        return RoleCall(
-            role="extraction",
-            tier=tier.tier,
-            model=tier.model,
-            tries=[],
-            answer=None,
-            error=f"{type(exc).__name__}: {exc}",
-        )
+        return role_call("extraction", tier, Asked(None, f"{type(exc).__name__}: {exc}"))
 
 
 def merge(ingested: Ingested, call: RoleCall) -> Ingested:

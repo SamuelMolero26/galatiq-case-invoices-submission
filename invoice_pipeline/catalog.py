@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from invoice_pipeline.model import vendor_key
+from invoice_pipeline.tools import open_readonly
 
 DEFAULT_INVENTORY_PATH = Path("inventory.db")
 SCHEMA_VERSION = 1
@@ -86,7 +87,7 @@ def seed(path: Path, reset: bool = False) -> None:
 
 
 def load_catalog(path: Path) -> Catalog:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = open_readonly(path)
     try:
         existing = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for table in TABLES:

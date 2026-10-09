@@ -74,11 +74,9 @@ def _bind_events(rt: Runtime, source: str) -> Runtime:
 
     Bound per file, not at bootstrap: the CLI swaps `on_event` after bootstrap.
     """
-    previous = rt.agents.on_step
 
     def on_step(name: str, detail: dict) -> None:
         _notify(rt, Event(name, source, dict(detail)))
-        previous(name, detail)
 
     return replace(rt, agents=replace(rt.agents, on_step=on_step))
 

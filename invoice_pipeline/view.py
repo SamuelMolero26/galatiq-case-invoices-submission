@@ -6,11 +6,11 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from invoice_pipeline.approval import label
 from invoice_pipeline.model import (
     CriticAttempt,
     Decision,
     Finding,
-    FindingCode,
     PaymentIssue,
     RoleCall,
     Severity,
@@ -247,7 +247,7 @@ def _attempt_notes(attempt: CriticAttempt) -> list[Note]:
     notes = []
     if assessor.assessments:
         text = "; ".join(
-            f"{_where(a.code, a.line)} {'explained' if a.explained else 'unexplained'}: "
+            f"{label(a.code, a.line)} {'explained' if a.explained else 'unexplained'}: "
             f"{a.rationale}"
             for a in assessor.assessments
         )
@@ -260,17 +260,13 @@ def _attempt_notes(attempt: CriticAttempt) -> list[Note]:
     if verifier is not None:
         if verifier.checks:
             text = "; ".join(
-                f"{_where(c.code, c.line)} {'holds' if c.holds else 'does not hold'}: {c.rationale}"
+                f"{label(c.code, c.line)} {'holds' if c.holds else 'does not hold'}: {c.rationale}"
                 for c in verifier.checks
             )
         else:
             text = f"no usable answer: {verifier.error}"
         notes.append(Note(f"verifier #{n}", text, model=True))
     return notes
-
-
-def _where(code: FindingCode, line: int | None) -> str:
-    return code.value if line is None else f"{code.value} line {line}"
 
 
 def _usd_evidence(row, record: dict) -> UsdEvidence | None:

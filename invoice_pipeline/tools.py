@@ -67,10 +67,8 @@ class ToolRunner:
         inventory: sqlite3.Connection,
         ledger_conn: sqlite3.Connection,
         invoice: Invoice,
-        budget: int = MAX_TOOL_CALLS,
     ):
-        self.inventory, self.ledger_conn = inventory, ledger_conn
-        self.invoice, self.budget = invoice, budget
+        self.inventory, self.ledger_conn, self.invoice = inventory, ledger_conn, invoice
         self.calls: list[ToolCall] = []
 
     def close(self) -> None:
@@ -82,8 +80,8 @@ class ToolRunner:
         parsed: dict[str, Any] = {"raw": arguments}
         result, error = None, None
         try:
-            if len(self.calls) >= self.budget:
-                raise ToolError(f"tool budget of {self.budget} calls exhausted")
+            if len(self.calls) >= MAX_TOOL_CALLS:
+                raise ToolError(f"tool budget of {MAX_TOOL_CALLS} calls exhausted")
             parsed = _parse(name, arguments)
             result = self._lookup(name, **parsed)
         except Exception as exc:
