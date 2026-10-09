@@ -69,6 +69,8 @@ uv run python main.py review --list --ledger=demo-ledger.db
 uv run python main.py tui --ledger=demo-ledger.db --inventory=demo-inventory.db --llm=grok
 ```
 
+![tui-demo](docs/TUI-Demo.png)
+
 The TUI cold-starts: a missing ledger or inventory database is created on startup (the
 inventory is seeded automatically), and it opens on the new-run view. Press `enter` on the
 default `data/invoices/` source to run the batch from inside the TUI with the same `--llm`
@@ -200,7 +202,7 @@ uv run pytest -q
 Current local result:
 
 ```text
-317 passed, 4 skipped
+321 passed, 4 skipped
 All checks passed!
 ```
 
