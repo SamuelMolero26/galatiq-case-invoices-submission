@@ -62,18 +62,14 @@ def model():
         server.server_close()
 
 
-def test_chat_reuses_one_connection(model):
-    server = model()
-    for _ in range(3):
-        assert chat(server.tier, [{"role": "user", "content": "hi"}]).content == "{}"
-    assert server.connections == 1
-
-
-def test_chat_reconnects_when_the_idle_connection_died(model):
-    server = model(close_after_reply=True)
+@pytest.mark.parametrize(("close_after_reply", "connections"), [(False, 1), (True, 2)])
+def test_chat_reuses_its_connection_and_reconnects_when_it_died(
+    model, close_after_reply, connections
+):
+    server = model(close_after_reply=close_after_reply)
     for _ in range(2):
         assert chat(server.tier, [{"role": "user", "content": "hi"}]).content == "{}"
-    assert server.connections == 2
+    assert server.connections == connections
 
 
 def test_chat_reports_an_http_error(model):

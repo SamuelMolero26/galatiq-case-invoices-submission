@@ -525,9 +525,27 @@ def process_path(
     return BatchResult(results, failed)
 
 
+def _ingested_detail(ingested: Ingested) -> dict:
+    """The `ingested` event detail: JSON-friendly summary of the parse, for presentation only."""
+    detail: dict = {"unreadable": ingested.invoice is None}
+    detail["findings"] = [f.code.value for f in ingested.findings]
+    invoice = ingested.invoice
+    if invoice is None:
+        detail["reason"] = ingested.unreadable_reason
+        return detail
+    total = None if invoice.total is None else str(invoice.total)
+    return detail | {
+        "vendor": invoice.vendor,
+        "invoice_number": invoice.invoice_number,
+        "total": total,
+        "currency": invoice.currency,
+        "items": len(invoice.items),
+    }
+
+
 def _process_one(conn, ingested: Ingested, source: str, rt: Runtime) -> ArrivalResult:
     rt = _bind_events(rt, source)
-    _notify(rt, Event("ingested", source, {"unreadable": ingested.invoice is None}))
+    _notify(rt, Event("ingested", source, _ingested_detail(ingested)))
     if ingested.invoice is None:
         with _stage(source, "approval"):
             decision = decide_unreadable(ingested.findings)

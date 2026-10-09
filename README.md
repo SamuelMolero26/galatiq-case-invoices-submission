@@ -17,42 +17,80 @@ uv sync --all-extras --locked
 `uv.lock` pins the complete environment. The `tui` extra is optional at runtime, but included by
 the command above for the full review experience.
 
-### 2. Run the complete sample corpus offline
+### 2. Configure Grok
+
+The full solution runs with the Grok tier: the model roles described in [Agentic path](#agentic-path)
+review every decision, extract missing fields, and investigate warnings. Configuration is read from
+the process environment; local env files are intentionally not loaded automatically. Set the
+variables in the same shell that runs the commands.
+
+macOS / Linux (bash, zsh):
 
 ```bash
-uv run python main.py --invoice_path=data/invoices --llm=offline --ledger=demo-ledger.db --inventory=demo-inventory.db
+export XAI_API_KEY="..."
+export GROK_BASE_URL="https://<provider-base>/v1"
+export XAI_MODEL="grok-4.7"  # optional; this is the default
+```
+
+Windows (PowerShell):
+
+```powershell
+$env:XAI_API_KEY = "..."
+$env:GROK_BASE_URL = "https://<provider-base>/v1"
+$env:XAI_MODEL = "grok-4.7"  # optional; this is the default
+```
+
+### 3. Run the complete sample corpus with Grok
+
+```bash
+uv run python main.py --invoice_path=data/invoices --llm=grok --ledger=demo-ledger.db --inventory=demo-inventory.db
 ```
 
 The commands in this guide are single-line and shell-neutral: they run unchanged in bash, zsh,
 PowerShell, and `cmd`. The demo databases are created in the current directory (`*.db` is
-git-ignored); delete `demo-*.db` to start fresh.
+git-ignored); delete `demo-*.db` to start fresh. The inventory database is seeded automatically
+when the requested path does not exist.
 
-The inventory database is seeded automatically when the requested path does not exist. A fresh
-offline run currently finishes with:
+Files are processed four at a time, because model round trips dominate each file's time. Set
+`INVOICE_WORKERS` to change that (`INVOICE_WORKERS=1` processes one file at a time; try `2` if the
+provider rate-limits you). Invoices that share an identity always run in file order, so a revision
+never overtakes its original. If online configuration is incomplete, startup fails explicitly
+instead of silently switching tiers.
 
-```text
-paid: 6, needs_review: 8, logged_rejection: 4, duplicate: 2; failed: 0
-```
-
-Offline mode performs no model or external network calls. It is the deterministic baseline and the
-recommended first review path.
-
-### 3. Inspect the review queue
+### 4. Inspect the review queue
 
 ```bash
 uv run python main.py review --list --ledger=demo-ledger.db
 ```
 
-### 4. Open the reviewer TUI
+### 5. Open the reviewer TUI
 
 ```bash
-uv run python main.py tui --ledger=demo-ledger.db --inventory=demo-inventory.db --llm=offline
+uv run python main.py tui --ledger=demo-ledger.db --inventory=demo-inventory.db --llm=grok
 ```
 
-Use `--llm=grok` instead to enable the online tier in the TUI; it needs the environment variables
-from [Run with Grok](#run-with-grok). The TUI browses what is already in the ledger, so run step 2
-first against the same database files.
+The TUI browses what is already in the ledger, so run step 3 first against the same database files.
 
+Starting a run from the TUI's new-run view shows live progress per file, what each file parsed
+into (vendor, number, total, findings) in the ingestion pane, and the agent log.
+
+### Optional: the offline baseline
+
+Offline mode performs no model or external network calls, so it needs no keys. It is the
+deterministic rules-only baseline: useful to see what the rules alone decide, and to compare with
+the Grok run. Use separate database files so the two runs do not mix:
+
+```bash
+uv run python main.py --invoice_path=data/invoices --llm=offline --ledger=offline-ledger.db --inventory=offline-inventory.db
+```
+
+A fresh offline run currently finishes with:
+
+```text
+paid: 6, needs_review: 8, logged_rejection: 4, duplicate: 2; failed: 0
+```
+
+Browse it with `uv run python main.py tui --ledger=offline-ledger.db --inventory=offline-inventory.db --llm=offline`.
 
 The TUI is a presentation layer over service read models. It does not duplicate validation,
 approval, payment, or ledger logic.
@@ -109,41 +147,12 @@ evidence checks, and failure behavior explicit in a small prototype.
 
 ### Run with Grok
 
-The online tier uses an OpenAI-compatible chat-completions endpoint. Configuration is read from the
-process environment; local env files are intentionally not loaded automatically.
-
-Set the variables in the same shell that runs the command.
-
-macOS / Linux (bash, zsh):
-
-```bash
-export XAI_API_KEY="..."
-export GROK_BASE_URL="https://<provider-base>/v1"
-export XAI_MODEL="grok-4.7"  # optional; this is the default
-```
-
-Windows (PowerShell):
-
-```powershell
-$env:XAI_API_KEY = "..."
-$env:GROK_BASE_URL = "https://<provider-base>/v1"
-$env:XAI_MODEL = "grok-4.7"  # optional; this is the default
-```
-
-Then run a single invoice, or point `--invoice_path` at a directory:
+The online tier uses an OpenAI-compatible chat-completions endpoint; setup and run commands are in
+the [five-minute review](#2-configure-grok). Run a single invoice with JSON lines output:
 
 ```bash
 uv run python main.py --invoice_path=data/invoices/invoice_1010.txt --llm=grok --ledger=demo-ledger.db --inventory=demo-inventory.db --json
 ```
-
-Open the reviewer TUI against the same databases with the online tier:
-
-```bash
-uv run python main.py tui --ledger=demo-ledger.db --inventory=demo-inventory.db --llm=grok
-```
-
-If online configuration is incomplete, startup fails explicitly instead of silently switching
-tiers.
 
 ## Safety properties
 

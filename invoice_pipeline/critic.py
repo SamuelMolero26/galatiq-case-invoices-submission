@@ -88,6 +88,27 @@ def offline_role(role: str) -> RoleCall:
     )
 
 
+def escalate_view(case_file: CaseFile) -> dict:
+    """The payload the escalate-only reviewer sees, and the only thing its evidence may cite.
+
+    Row 6 is always a new arrival, so the arrival bookkeeping defaults (`claimed_state: "paid"`,
+    null `paid_to_date`) are left out: with them the model escalated every clean invoice. Nulls
+    and empty dicts are left out too, so nothing uncitable is shown.
+    """
+    references = {
+        key: value
+        for key, value in case_file.references.model_dump(mode="json", exclude_none=True).items()
+        if value != {}
+    }
+    return {
+        "invoice": case_file.invoice.model_dump(mode="json", exclude_none=True),
+        "arrival": {"kind": case_file.arrival.kind},
+        "references": references,
+        "vendor_history": [h.model_dump(mode="json") for h in case_file.vendor_history],
+        "vendor_history_total": case_file.vendor_history_total,
+    }
+
+
 def offline_agents() -> Agents:
     """The permanent `Agents` bundle for the offline tier; every path fails closed, no I/O."""
     return Agents(
@@ -98,12 +119,12 @@ def offline_agents() -> Agents:
     )
 
 
-def _is_case_file_path(case_file: BaseModel, path: str) -> bool:
-    """Whether dotted `path` names a concrete value inside this Case File.
+def _is_case_file_path(case_file: BaseModel | dict, path: str) -> bool:
+    """Whether dotted `path` names a concrete value inside this Case File (or trimmed view).
 
     Models resolve by field name, lists by index, dicts by key; a scalar with a
     further segment, or any unknown segment, is not in the Case File. A path that
-    ends on a whole record (a model) or on a null is not evidence of anything.
+    ends on a whole record (a model or a dict) or on a null is not evidence of anything.
     """
     node: Any = case_file
     for part in path.split("."):
@@ -123,11 +144,16 @@ def _is_case_file_path(case_file: BaseModel, path: str) -> bool:
             node = node[int(part)]
         else:
             return False
-    return node is not None and not isinstance(node, BaseModel)
+    return node is not None and not isinstance(node, BaseModel | dict)
 
 
 def _validate_escalate(case_file: CaseFile):
-    """Validator for the escalate-only review: verdict, evidence, rationale all required."""
+    """Validator for the escalate-only review: verdict, evidence, rationale all required.
+
+    Evidence is checked against `escalate_view`, so a field the model was not shown is not citable.
+    """
+
+    view = escalate_view(case_file)
 
     def validate(content: str):
         try:
@@ -144,13 +170,16 @@ def _validate_escalate(case_file: CaseFile):
             or not evidence
             or not all(isinstance(item, str) for item in evidence)
         ):
-            return CorrectableError("field 'evidence' must be a non-empty list of Case File paths")
+            return CorrectableError("field 'evidence' must be a non-empty list of payload paths")
+        bad: list[str] = []
         for path in evidence:
-            if not _is_case_file_path(case_file, path):
-                return CorrectableError(
-                    f"evidence path {path!r} must name a non-null field of the Case File, "
-                    "not a whole record"
+            if not _is_case_file_path(view, path):
+                bad.append(
+                    f"evidence path {path!r} must name a concrete non-null leaf value of the "
+                    "payload (e.g. invoice.items.0.unit_price), not a whole record"
                 )
+        if bad:
+            return CorrectableError("evidence paths are not all citable: " + "; ".join(bad))
         if not isinstance(data.get("rationale"), str) or not data["rationale"].strip():
             return CorrectableError("field 'rationale' must be a non-empty string")
         return data
@@ -171,16 +200,26 @@ def _validate_advisory(content: str):
     return data
 
 
+ESCALATE_SYSTEM = (
+    "You review a clean invoice: deterministic checks found no stock, price, arithmetic, "
+    "vendor, or currency issues. Reply ONLY with JSON: "
+    '{"verdict": "concur"|"escalate", "evidence": ["<dotted payload path>", ...], '
+    '"rationale": "..."}. Concur unless you spot a concrete fraud or error signal in the '
+    "invoice itself (mismatched vendor identity, altered totals, suspicious notes). "
+    "Never compute deadlines from payment_terms or due_date_text: they are raw text, not "
+    "rules. Cite only payload paths that directly support the escalation. "
+    "Evidence is always required, even to concur, and must name leaf values such as "
+    '"invoice.items.0.unit_price" or "references.reference_prices.WidgetA", never a whole '
+    'table such as "references.reference_prices" and never an empty list. Example: '
+    '{"verdict": "concur", "evidence": ["invoice.vendor", "invoice.total", '
+    '"references.reference_prices.WidgetA"], "rationale": "prices match, totals tie out"}.'
+)
+
+
 def _escalate_messages(case_file: CaseFile) -> list[dict]:
     return [
-        {
-            "role": "system",
-            "content": "You are the escalate-only reviewer of a clean invoice. Reply ONLY "
-            'with JSON: {"verdict": "concur"|"escalate", "evidence": '
-            '["<dotted Case File path>", ...], "rationale": "..."}. Concur only when '
-            "nothing in the Case File needs a human; you never approve payment.",
-        },
-        {"role": "user", "content": case_file.model_dump_json()},
+        {"role": "system", "content": ESCALATE_SYSTEM},
+        {"role": "user", "content": json.dumps(escalate_view(case_file))},
     ]
 
 
