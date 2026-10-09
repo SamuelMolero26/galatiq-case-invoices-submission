@@ -477,12 +477,15 @@ def _bar(fraction: float, width: int, colour: str, rest: str = RULE) -> Text:
     return Text.assemble(("█" * filled, colour), ("░" * (width - filled), rest))
 
 
-def _file_mark(row: FileProgress) -> tuple[str, str, str]:
-    """(glyph, colour, stage label) for a file of the run."""
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _file_mark(row: FileProgress, frame: int = 0) -> tuple[str, str, str]:
+    """(glyph, colour, stage label) for a file of the run; `frame` spins the in-flight glyph."""
     if row.stage == "queued":
         return "·", MUTED, "queued"
     if row.stage != "done":
-        return "⠿", TEXT, row.stage
+        return SPINNER[frame % len(SPINNER)], TEXT, row.stage
     if row.failed:
         return "✗", RED, "failed"
     state = next((s for s in FILE_STATE_ORDER if s in row.states), None)
@@ -495,14 +498,24 @@ def _file_mark(row: FileProgress) -> tuple[str, str, str]:
 class RunFiles(Static):
     """The run's files: glyph, name, mini bar and the stage each is in."""
 
+    frame = 0
+    _progress: RunProgress | None = None
+
+    def spin(self) -> None:
+        """Advance the in-flight glyph one frame (driven by the app's timer)."""
+        self.frame += 1
+        if self._progress is not None:
+            self.show(self._progress)
+
     def show(self, progress: RunProgress) -> None:
+        self._progress = progress
         table = Table.grid(expand=True, padding=(0, 1))
         table.add_column(width=1)
         table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
         table.add_column(width=BAR)
         table.add_column(width=15, no_wrap=True)
         for row in progress.files.values():
-            glyph, colour, label = _file_mark(row)
+            glyph, colour, label = _file_mark(row, self.frame)
             queued = row.stage == "queued"
             done = row.stage == "done"
             name = Text(row.name, MUTED if queued else TEXT)
@@ -643,6 +656,11 @@ class InvoiceApp(App):
             self.query_one(RunHeader).tier = self.runtime.tier
         self._show_view("all")
         self._set_mode(self.start)
+        self.set_interval(0.1, self._spin)
+
+    def _spin(self) -> None:
+        if self.mode == "processing":
+            self.query_one(RunFiles).spin()
 
     def _set_mode(self, mode: str, reload: bool = False) -> None:
         """Show New run, Processing or the Results views, with their header, focus and keys.
@@ -711,16 +729,26 @@ class InvoiceApp(App):
         def relay(event) -> None:
             self.call_from_thread(self._pipeline_event, event.name, event.file, dict(event.detail))
 
+        def started(name: str) -> None:
+            if worker.is_cancelled:
+                raise RuntimeError("run cancelled")  # ends this lane; the run is being replaced
+            self.call_from_thread(self._file_started, name)
+
+        def done(name: str, batch) -> None:
+            states = tuple(result.state for result in batch.results)
+            if not worker.is_cancelled:
+                self.call_from_thread(self._file_done, name, states, len(batch.failed))
+
         rt = dataclasses.replace(self.runtime, on_event=relay)
         error = None
         try:
-            for path in discovery.paths:
-                if worker.is_cancelled:
-                    return
-                self.call_from_thread(self._file_started, path.name)
-                batch = service.run_batch([path], rt)
-                states = tuple(result.state for result in batch.results)
-                self.call_from_thread(self._file_done, path.name, states, len(batch.failed))
+            service.run_batch(
+                list(discovery.paths),
+                rt,
+                workers=service.default_workers(),
+                on_start=started,
+                on_done=done,
+            )
         except Exception as exc:  # shown, never a crash
             error = f"run stopped: {exc}"
         if not worker.is_cancelled:
