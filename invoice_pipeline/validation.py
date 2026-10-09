@@ -22,7 +22,7 @@ def validate(invoice: Invoice, catalog: Catalog) -> list[Finding]:
     findings += _vendor(invoice, catalog)
     findings += _items(invoice, catalog)
     findings += _payable(invoice)
-    findings += reconcile(invoice)[0]
+    findings += reconcile(invoice)
     findings += _prices(invoice, catalog)
     findings += _currency(invoice)
     return findings
@@ -167,22 +167,19 @@ def _payable(invoice: Invoice) -> list[Finding]:
     return findings
 
 
-def reconcile(invoice: Invoice) -> tuple[list[Finding], list[str]]:
-    """Exact Reconciliation: (findings, notes). Notes record derived or unverifiable amounts."""
+def reconcile(invoice: Invoice) -> list[Finding]:
+    """Exact Reconciliation; a line with an unknown amount makes the tie-outs unverifiable."""
     findings: list[Finding] = []
-    notes: list[str] = []
     amounts: list[Decimal] = []
     derived: list[str] = []
     verifiable = True
     for index, item in enumerate(invoice.items):
         if item.quantity is None or item.unit_price is None:
             verifiable = False
-            notes.append(f"line {index}: amount cannot be known; tie-outs not verifiable")
             continue
         expected = item.quantity * item.unit_price
         if item.line_total is None:
             derived.append(f"line {index} amount derived: {_m(expected)}")
-            notes.append(derived[-1])
             amounts.append(expected)
             continue
         amounts.append(item.line_total)
@@ -196,7 +193,7 @@ def reconcile(invoice: Invoice) -> tuple[list[Finding], list[str]]:
                 )
             )
     if not verifiable:
-        return findings, notes
+        return findings
     suffix = f" ({'; '.join(derived)})" if derived else ""
     lines_sum = sum(amounts, Decimal(0))
     if invoice.subtotal is not None and lines_sum != invoice.subtotal:
@@ -219,7 +216,7 @@ def reconcile(invoice: Invoice) -> tuple[list[Finding], list[str]]:
                     f"{_m(expected_total)} but stated total is {_m(invoice.total)}{suffix}",
                 )
             )
-    return findings, notes
+    return findings
 
 
 def _signed_deviations(invoice: Invoice, catalog: Catalog) -> dict[int, tuple[Decimal, Decimal]]:

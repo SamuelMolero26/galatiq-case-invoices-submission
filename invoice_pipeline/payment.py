@@ -26,10 +26,6 @@ def mock_payment(vendor: str, amount: Decimal, currency: str) -> dict:
     return {"status": "success"}
 
 
-def _failure(what: str, now: datetime, response: dict | None = None) -> PaymentIssue:
-    return PaymentIssue(what=what, when=now, bank_response=response)
-
-
 def pay(
     conn: sqlite3.Connection, arrival_id: int, pay_fn: PayFn, now: Callable[[], datetime]
 ) -> PaymentIssue | None:
@@ -43,7 +39,7 @@ def pay(
     try:
         result = pay_fn(row["vendor_name"], amount, row["currency"])
     except Exception as exc:  # refusal, connection error, timeout: all unconfirmed
-        issue = _failure(f"payment call failed: {type(exc).__name__}: {exc}", now())
+        issue = PaymentIssue(what=f"payment call failed: {type(exc).__name__}: {exc}", when=now())
     else:
         status = result.get("status") if isinstance(result, dict) else None
         if status == "success":
@@ -52,8 +48,10 @@ def pay(
                     conn, arrival_id, state="paid", amount_paid=str(amount), payment_issue=None
                 )
             return None
-        issue = _failure(
-            f"bank returned status {status!r}", now(), result if isinstance(result, dict) else None
+        issue = PaymentIssue(
+            what=f"bank returned status {status!r}",
+            when=now(),
+            bank_response=result if isinstance(result, dict) else None,
         )
     with ledger.write_txn(conn):
         ledger.update_arrival(conn, arrival_id, payment_issue=issue.model_dump_json())

@@ -199,7 +199,6 @@ def ask[T](
     tools: list[dict] | None = None,
     run_tool: Callable[[str, str], dict] | None = None,
     tries: int = FORMAT_TRIES,
-    corrective_role: str = "user",
     chat_fn: Callable[..., ChatReply] = chat,
 ) -> Asked[T]:
     """The Correction Wrapper: validate each answer and, on a format error, reply with the exact
@@ -230,7 +229,7 @@ def ask[T](
         current.correction = result.message
         conversation += [
             {"role": "assistant", "content": reply.content or ""},
-            {"role": corrective_role, "content": result.message},
+            {"role": "user", "content": result.message},
         ]
     raise AssertionError("tries must be at least 1")
 
