@@ -13,7 +13,7 @@ from conftest import SAMPLE_INVOICES  # noqa: E402
 from test_tui import SIZE, plain  # noqa: E402
 from textual.widgets import Input  # noqa: E402
 
-from invoice_pipeline import service, tui  # noqa: E402
+from invoice_pipeline import service, tui, view  # noqa: E402
 
 SAMPLE_NAMES = sorted(p.name for p in SAMPLE_INVOICES.iterdir() if p.is_file())
 
@@ -239,7 +239,7 @@ def test_a_run_streams_into_processing_then_lands_on_matching_results(tmp_path):
     assert any("payment" in line for line in files) and any("queued" in line for line in files)
     assert "approval invoice_1001.txt decision → approved" in log
     assert peek == ("results", ()) and back == "processing"  # no actions while a run writes
-    results = service.results(rt.ledger_path)
+    results = view.results(rt.ledger_path)
     assert results.count("all") == rows == 20
     assert f"all {results.count('all')}" in tabs
     assert f"approved {results.count('approved')}" in tabs

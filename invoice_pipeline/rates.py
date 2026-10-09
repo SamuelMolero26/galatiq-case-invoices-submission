@@ -13,13 +13,14 @@ class ReferenceRate:
     as_of: date
 
 
+AS_OF = date(2026, 1, 2)  # pinned date of every rate below, USD included
 REFERENCE_RATES: dict[str, ReferenceRate] = {
-    "EUR": ReferenceRate(rate=Decimal("1.08"), as_of=date(2026, 1, 2)),
+    "EUR": ReferenceRate(rate=Decimal("1.08"), as_of=AS_OF)
 }
 # The buffer inflates the converted amount, so a rate that moved against us can only make the
 # Heightened Scrutiny check (> $10,000) fire earlier, never later.
 SAFETY_BUFFER = Decimal("0.05")
-_USD = ReferenceRate(rate=Decimal(1), as_of=REFERENCE_RATES["EUR"].as_of)  # implicit, at par
+_USD = ReferenceRate(rate=Decimal(1), as_of=AS_OF)  # implicit, at par
 
 
 def usd_equivalent(amount: Decimal, currency: str) -> UsdEquivalent | None:

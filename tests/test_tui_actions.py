@@ -18,7 +18,7 @@ from test_service_retry import CLEAN  # noqa: E402
 from test_tui import drive, plain  # noqa: E402
 from textual.widgets import Button, Input, Static  # noqa: E402
 
-from invoice_pipeline import catalog, cli, service, tui  # noqa: E402
+from invoice_pipeline import catalog, cli, service, tui, view  # noqa: E402
 from invoice_pipeline.llm import LLMError  # noqa: E402
 
 
@@ -125,7 +125,7 @@ def test_approve_requires_a_reason_and_delegates_to_resolve_unchanged(rt, paid, 
         return resolve(*args)
 
     monkeypatch.setattr(service, "resolve", spy)
-    arrival_id = {r.source: r.arrival_id for r in service.results(rt.ledger_path).rows}[
+    arrival_id = {r.source: r.arrival_id for r in view.results(rt.ledger_path).rows}[
         "invoice_1002.txt"
     ]
 
@@ -157,7 +157,7 @@ def test_approve_requires_a_reason_and_delegates_to_resolve_unchanged(rt, paid, 
     assert calls == [(rt, arrival_id, "approve", "stock confirmed with the warehouse")]
     assert len(paid) == 1 and "paid" in shown
     assert "approved 7" in tab_text  # 6 paid by the batch, plus this one: refreshed
-    assert service.arrival_detail(rt.ledger_path, arrival_id).state == "paid"
+    assert view.arrival_detail(rt.ledger_path, arrival_id).state == "paid"
 
 
 def test_refusal_text_is_shown_and_nothing_changes(rt, paid):
@@ -223,4 +223,4 @@ def test_retry_runs_in_a_worker_with_progress_then_the_result(tmp_path, grok):
     assert "retrying" in progress and while_running == []
     assert "approved" in result and "paid" in result
     assert len(h.paid) == 1 and "approved 1" in tab_text
-    assert service.arrival_detail(h.ledger_path, first.arrival_id).state == "paid"
+    assert view.arrival_detail(h.ledger_path, first.arrival_id).state == "paid"

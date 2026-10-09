@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 from conftest import Harness, concur, text_reply
 
-from invoice_pipeline import ledger, service
+from invoice_pipeline import ledger, service, view
 
 EUR_GATE = {  # only CURRENCY_NON_USD: the full gate runs on it
     "invoice_number": "INV-8401",
@@ -45,12 +45,12 @@ ADVICE = text_reply(json.dumps({"rationale": "explained for the reviewer"}))
 
 
 def _arrival_id(ledger_path, source) -> int:
-    rows = service.results(ledger_path).rows
+    rows = view.results(ledger_path).rows
     return next(r.arrival_id for r in rows if r.source == source)
 
 
-def _detail(ledger_path, source) -> service.ArrivalDetail:
-    return service.arrival_detail(ledger_path, _arrival_id(ledger_path, source))
+def _detail(ledger_path, source) -> view.ArrivalDetail:
+    return view.arrival_detail(ledger_path, _arrival_id(ledger_path, source))
 
 
 def _states(ledger_path) -> Counter:
@@ -61,12 +61,12 @@ def _states(ledger_path) -> Counter:
         conn.close()
 
 
-def _notes(detail) -> dict[str, service.Note]:
+def _notes(detail) -> dict[str, view.Note]:
     return {note.role: note for note in detail.notes}
 
 
 def test_views_follow_ledger_states_and_the_review_queue(batch_ledger):
-    results = service.results(batch_ledger)
+    results = view.results(batch_ledger)
     states = _states(batch_ledger)
 
     assert results.count("all") == sum(states.values()) == 20
@@ -81,7 +81,7 @@ def test_views_follow_ledger_states_and_the_review_queue(batch_ledger):
 
 
 def test_funnel_counts_come_from_the_ledger(batch_ledger):
-    results = service.results(batch_ledger)
+    results = view.results(batch_ledger)
     states = _states(batch_ledger)
 
     assert results.files == 20
@@ -130,7 +130,7 @@ def test_usd_evidence_does_not_depend_on_the_finding_wording(batch_ledger):
             f["detail"] = "non-USD invoice (wording changed)"
 
     _rewrite_record(batch_ledger, arrival_id, reword)
-    usd = service.arrival_detail(batch_ledger, arrival_id).usd
+    usd = view.arrival_detail(batch_ledger, arrival_id).usd
 
     assert (usd.total, usd.currency, usd.amount) == (Decimal("4125.00"), "EUR", Decimal("4677.75"))
     assert (usd.rate, usd.as_of, usd.buffer_pct) == (Decimal("1.08"), date(2026, 1, 2), 5)
@@ -140,7 +140,7 @@ def test_legacy_record_without_usd_equivalent_has_no_usd_evidence(batch_ledger):
     arrival_id = _arrival_id(batch_ledger, "invoice_1014.xml")
 
     _rewrite_record(batch_ledger, arrival_id, lambda record: record.pop("usd_equivalent", None))
-    detail = service.arrival_detail(batch_ledger, arrival_id)
+    detail = view.arrival_detail(batch_ledger, arrival_id)
 
     assert detail.usd is None  # no fallback to parsing the finding detail
     assert detail.finding_codes == ["CURRENCY_NON_USD"]
@@ -192,7 +192,7 @@ def test_model_answers_are_labeled_model_output(tmp_path, grok):
     h = Harness(tmp_path, grok, ADVICE)
     result = h.process("eur.json", EUR_SHORTAGE)
 
-    notes = _notes(service.arrival_detail(h.ledger_path, result.arrival_id))
+    notes = _notes(view.arrival_detail(h.ledger_path, result.arrival_id))
 
     assert notes["advisory"].model and notes["advisory"].text == "explained for the reviewer"
     assert not notes["rule engine"].model
@@ -202,7 +202,7 @@ def test_escalate_review_verdict_is_model_output(tmp_path, grok):
     h = Harness(tmp_path, grok, concur())
     result = h.process("usd.json", CLEAN_USD)
 
-    note = _notes(service.arrival_detail(h.ledger_path, result.arrival_id))["escalate-review"]
+    note = _notes(view.arrival_detail(h.ledger_path, result.arrival_id))["escalate-review"]
 
     assert note.model and note.text == "concur: nothing needs a human"
 
@@ -224,7 +224,7 @@ def test_full_gate_attempts_become_assessor_and_verifier_notes(tmp_path, grok):
     )
     result = h.process("eur.json", EUR_GATE)
 
-    detail = service.arrival_detail(h.ledger_path, result.arrival_id)
+    detail = view.arrival_detail(h.ledger_path, result.arrival_id)
     notes = _notes(detail)
 
     assert detail.view == "approved"
@@ -236,9 +236,9 @@ def test_heightened_scrutiny_is_read_from_the_decision(tmp_path, grok):
     h = Harness(tmp_path, grok, ADVICE)
     result = h.process("eur.json", EUR_HEIGHTENED)
 
-    assert service.arrival_detail(h.ledger_path, result.arrival_id).scrutiny == "heightened"
+    assert view.arrival_detail(h.ledger_path, result.arrival_id).scrutiny == "heightened"
 
 
 def test_unknown_arrival_is_refused(batch_ledger):
     with pytest.raises(LookupError, match="no arrival #999"):
-        service.arrival_detail(batch_ledger, 999)
+        view.arrival_detail(batch_ledger, 999)

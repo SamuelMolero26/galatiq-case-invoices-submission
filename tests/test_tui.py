@@ -16,7 +16,7 @@ from conftest import Harness, text_reply  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.text import Text  # noqa: E402
 
-from invoice_pipeline import ledger, service, tui  # noqa: E402
+from invoice_pipeline import ledger, service, tui, view  # noqa: E402
 
 SIZE = (150, 40)
 
@@ -140,7 +140,7 @@ def test_needs_review_detail_shows_the_eur_usd_evidence(batch_ledger):
 
 
 def test_rejected_detail_shows_stages_and_finding_chips(batch_ledger):
-    detail = service.arrival_detail(batch_ledger, 10)  # invoice_1009.json
+    detail = view.arrival_detail(batch_ledger, 10)  # invoice_1009.json
 
     text = plain(render_detail(detail))
 
@@ -160,7 +160,7 @@ def test_model_notes_are_labeled_and_rule_notes_are_not(tmp_path, grok):
     h = Harness(tmp_path, grok, advice)
     result = h.process("eur.json", EUR_SHORTAGE)
 
-    lines = plain(render_detail(service.arrival_detail(h.ledger_path, result.arrival_id)))
+    lines = plain(render_detail(view.arrival_detail(h.ledger_path, result.arrival_id)))
     lines = lines.splitlines()
 
     advisory = next(line for line in lines if "explained for the reviewer" in line)
@@ -192,12 +192,14 @@ def test_widgets_never_reach_past_the_service_read_models():
             assert not any(a.name.startswith("invoice_pipeline") for a in node.names)
         if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("invoice_pipeline"):
             if node.module == "invoice_pipeline":
-                assert [a.name for a in node.names] == ["service"]
-            else:  # only plain read-model dataclasses come from the service
-                assert node.module == "invoice_pipeline.service"
+                assert [a.name for a in node.names] == ["service", "view"]
+            else:  # only plain read-model dataclasses come from the service and view modules
+                module = {"invoice_pipeline.service": service, "invoice_pipeline.view": view}
+                assert node.module in module
                 for alias in node.names:
-                    assert dataclasses.is_dataclass(getattr(service, alias.name)), alias.name
+                    owner = module[node.module]
+                    assert dataclasses.is_dataclass(getattr(owner, alias.name)), alias.name
     app = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "InvoiceApp")
     inside = {id(n) for n in ast.walk(app)}
-    service_uses = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "service"]
-    assert service_uses and all(id(n) in inside for n in service_uses)
+    uses = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id in ("service", "view")]
+    assert uses and all(id(n) in inside for n in uses)
