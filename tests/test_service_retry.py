@@ -12,7 +12,7 @@ import pytest
 from conftest import Harness, concur
 from test_extraction import ADVICE, reply, txt
 
-from invoice_pipeline import catalog, ledger, service
+from invoice_pipeline import catalog, ledger, service, view
 from invoice_pipeline.critic import offline_agents
 from invoice_pipeline.llm import LLMError
 
@@ -50,7 +50,7 @@ def _record(h: Harness, arrival_id: int) -> dict:
 
 
 def _actions(ledger_path, arrival_id, online=False) -> tuple[str, ...]:
-    return service.arrival_detail(ledger_path, arrival_id, online=online).actions
+    return view.arrival_detail(ledger_path, arrival_id, online=online).actions
 
 
 def _failed_review(h: Harness, name="a.json", content=CLEAN) -> service.ArrivalResult:
@@ -65,7 +65,7 @@ def _failed_review(h: Harness, name="a.json", content=CLEAN) -> service.ArrivalR
 
 
 def _by_source(ledger_path) -> dict[str, int]:
-    return {r.source: r.arrival_id for r in service.results(ledger_path).rows}
+    return {r.source: r.arrival_id for r in view.results(ledger_path).rows}
 
 
 @pytest.mark.parametrize(
@@ -256,5 +256,5 @@ def test_retry_refused_when_a_reviewer_resolved_the_arrival_meanwhile(tmp_path, 
 
     record = _record(h, first.arrival_id)
     assert record["decision"]["reasons"][0].startswith("ESCALATE_ONLY_REVIEW_FAILED")
-    assert service.arrival_detail(h.ledger_path, first.arrival_id).state == "logged_rejection"
+    assert view.arrival_detail(h.ledger_path, first.arrival_id).state == "logged_rejection"
     assert h.paid == []

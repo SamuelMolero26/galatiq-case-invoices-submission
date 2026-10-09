@@ -27,11 +27,10 @@ from textual.widgets import Button, ContentSwitcher, Input, OptionList, Static
 from textual.widgets.option_list import Option
 from textual.worker import get_current_worker
 
-from invoice_pipeline import service
-from invoice_pipeline.service import (
+from invoice_pipeline import service, view
+from invoice_pipeline.service import ArrivalResult, Discovery
+from invoice_pipeline.view import (
     ArrivalDetail,
-    ArrivalResult,
-    Discovery,
     Note,
     ResultRow,
     Results,
@@ -44,13 +43,13 @@ BG, TEXT = "#141411", "#D6D2C6"
 MUTED, DIM, SOFT, RULE = "#69655B", "#898270", "#A59E8F", "#3A382F"
 GREEN, AMBER, AMBER_DIM, RED = "#89B775", "#C6AC6E", "#9A8656", "#C38A76"
 
-TABS = (  # (view, label, colour), in `service.VIEWS` order
+TABS = (  # (view, label, colour), in `view.VIEWS` order
     ("all", "all", TEXT),
     ("approved", "approved", GREEN),
     ("needs_review", "needs review", AMBER),
     ("rejected", "rejected", RED),
 )
-VIEW_COLOUR = {view: colour for view, _, colour in TABS} | {None: SOFT}
+VIEW_COLOUR = {name: colour for name, _, colour in TABS} | {None: SOFT}
 STATE_MARK = {  # Ledger state -> (glyph, colour, badge)
     "paid": ("✓", GREEN, "APPROVED"),
     "needs_review": ("?", AMBER, "NEEDS REVIEW"),
@@ -207,9 +206,9 @@ class TabBar(Static):
 
     def show(self, results: Results, active: str) -> None:
         text = Text()
-        for view, label, colour in TABS:
-            count = results.count(view)
-            if view == active:
+        for name, label, colour in TABS:
+            count = results.count(name)
+            if name == active:
                 text.append(f" {label} {count} ", f"bold {BG} on {colour}")
             else:
                 text.append(f" {label} ", colour)
@@ -648,7 +647,7 @@ class InvoiceApp(App):
         try:
             if self.runtime is None and self.bootstrap_args is not None:
                 self.runtime = service.bootstrap(self.bootstrap_args)
-            self.results = service.results(self.ledger_path)
+            self.results = view.results(self.ledger_path)
         except service.BootstrapError as exc:
             self.exit(return_code=1, message=f"cannot start: {exc}")
             return
@@ -681,7 +680,7 @@ class InvoiceApp(App):
             self._show_progress()
         else:
             if reload:
-                self.results = service.results(self.ledger_path)
+                self.results = view.results(self.ledger_path)
                 self._show_view(self.active_view)
             self.query_one(RunHeader).show(self.results)
             self._show_actions()
@@ -800,13 +799,13 @@ class InvoiceApp(App):
         if self.mode != "results":  # tab leaves New run or Processing for the view shown last
             self._set_mode("results", reload=self.progress is not None)
             return
-        index = service.VIEWS.index(self.active_view)
-        self._show_view(service.VIEWS[(index + step) % len(service.VIEWS)])
+        index = view.VIEWS.index(self.active_view)
+        self._show_view(view.VIEWS[(index + step) % len(view.VIEWS)])
 
     def action_jump_view(self, index: int) -> None:
         if self.mode != "results":
             self._set_mode("results", reload=self.progress is not None)
-        self._show_view(service.VIEWS[index])
+        self._show_view(view.VIEWS[index])
 
     def _show_view(self, view: str, keep: int | None = None) -> None:
         """Show a view; `keep` re-selects that arrival when it is still in the view."""
@@ -832,7 +831,7 @@ class InvoiceApp(App):
         else:
             pane.say(None)
         online = self.runtime is not None and self.runtime.tier != "offline"
-        pane.show(service.arrival_detail(self.ledger_path, int(event.option.id), online=online))
+        pane.show(view.arrival_detail(self.ledger_path, int(event.option.id), online=online))
         self._show_actions()
 
     def _available(self) -> tuple[str, ...]:
@@ -903,7 +902,7 @@ class InvoiceApp(App):
 
     def _refresh(self, arrival_id: int, message: str, colour: str) -> None:
         """Reload the results from the Ledger, keep the view, and show the action's outcome."""
-        self.results = service.results(self.ledger_path)
+        self.results = view.results(self.ledger_path)
         self.query_one(RunHeader).show(self.results)
         self.keep_status = True
         self._show_view(self.active_view, keep=arrival_id)
@@ -913,8 +912,8 @@ class InvoiceApp(App):
 
 def _outcome(verb: str, result: ArrivalResult) -> tuple[str, str]:
     state = result.state.replace("_", " ")
-    view = {"paid": "approved", "logged_rejection": "rejected"}.get(result.state, "needs_review")
-    return f"{verb} arrival #{result.arrival_id} · now {state}", VIEW_STATUS[view]
+    bucket = {"paid": "approved", "logged_rejection": "rejected"}.get(result.state, "needs_review")
+    return f"{verb} arrival #{result.arrival_id} · now {state}", VIEW_STATUS[bucket]
 
 
 def run(ledger_path: Path, args: argparse.Namespace | None = None) -> int:
