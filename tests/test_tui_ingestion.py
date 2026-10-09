@@ -45,7 +45,7 @@ def run_events(batch_ledger, names, events):
 def test_the_pane_lists_what_each_ingested_file_parsed_into(batch_ledger):
     text = run_events(
         batch_ledger,
-        ["a.json", "b.json", "c.txt"],
+        ["a.json", "b.json", "c.txt", "many.csv"],
         [
             ("ingested", "a.json", PARSED),
             ("extract", "a.json", {"fields": ["vendor"]}),
@@ -54,6 +54,8 @@ def test_the_pane_lists_what_each_ingested_file_parsed_into(batch_ledger):
                 "b.json",
                 {"unreadable": True, "reason": "parse: bad json", "findings": []},
             ),
+            ("ingested", "many.csv", PARSED),
+            ("ingested", "many.csv", PARSED | {"invoice_number": "INV-8"}),
         ],
     )
 
@@ -61,15 +63,4 @@ def test_the_pane_lists_what_each_ingested_file_parsed_into(batch_ledger):
     assert "MISSING_PO" in text and "extracted: vendor" in text
     assert "b.json" in text and "unreadable: parse: bad json" in text
     assert "c.txt" not in text  # not ingested yet
-
-
-def test_a_csv_with_several_invoices_gets_a_block_for_each(batch_ledger):
-    second = PARSED | {"invoice_number": "INV-8"}
-    text = run_events(
-        batch_ledger,
-        ["many.csv"],
-        [("ingested", "many.csv", PARSED), ("ingested", "many.csv", second)],
-    )
-
-    assert text.count("many.csv") == 2
-    assert "INV-7" in text and "INV-8" in text
+    assert text.count("many.csv") == 2 and "INV-8" in text  # one block per invoice

@@ -14,13 +14,17 @@ from invoice_pipeline.model import Outcome
 
 
 def test_concur_keeps_approved_with_rationale_and_tries(grok, make_case):
-    agents = online_agents(grok, chat_fn=ScriptedChat(concur()))
+    # the first answer cites a field the reviewer is not shown: refused, then corrected
+    chat = ScriptedChat(concur(evidence=["arrival.claimed_state"]), concur())
 
-    decision = decide(make_case(), agents)
+    decision = decide(make_case(), online_agents(grok, chat_fn=chat))
 
     assert (decision.outcome, decision.precedence_row) == (Outcome.APPROVED, 6)
     assert decision.escalate_review.answer["rationale"] == "nothing needs a human"
-    assert len(decision.escalate_review.tries) == 1
+    assert len(decision.escalate_review.tries) == 2
+    sent = json.dumps(chat.requests[0]["messages"][1])
+    for hidden in ("claimed_state", "paid_to_date", "payment_terms", "due_date_text"):
+        assert hidden not in sent
 
 
 def test_escalate_answer_needs_review_no_payment(grok, make_case):
