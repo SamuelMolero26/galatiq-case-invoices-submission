@@ -69,10 +69,13 @@ uv run python main.py review --list --ledger=demo-ledger.db
 uv run python main.py tui --ledger=demo-ledger.db --inventory=demo-inventory.db --llm=grok
 ```
 
-The TUI browses what is already in the ledger, so run step 3 first against the same database files.
+The TUI cold-starts: a missing ledger or inventory database is created on startup (the
+inventory is seeded automatically), and it opens on the new-run view. Press `enter` on the
+default `data/invoices/` source to run the batch from inside the TUI with the same `--llm`
+tier, or run step 3 first and the TUI will browse that ledger instead.
 
-Starting a run from the TUI's new-run view shows live progress per file, what each file parsed
-into (vendor, number, total, findings) in the ingestion pane, and the agent log.
+A run shows live progress per file, what each file parsed into (vendor, number, total,
+findings) in the ingestion pane, and the agent log.
 
 ### Optional: the offline baseline
 

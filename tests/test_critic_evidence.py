@@ -235,9 +235,7 @@ def test_price_deviation_accepts_exact_authoritative_case_file_evidence(path):
 
 
 def test_price_deviation_accepts_successful_matching_reference_price_result():
-    failures = _price_deviation_failures(
-        "tool.0.result.unit_price", [_reference_price_call()]
-    )
+    failures = _price_deviation_failures("tool.0.result.unit_price", [_reference_price_call()])
 
     assert failures == []
 
@@ -329,9 +327,7 @@ def test_assessor_blank_rationale_is_a_correctable_parsing_failure(rationale):
 
 @pytest.mark.parametrize("rationale", _BLANK_RATIONALES)
 def test_verifier_blank_rationale_is_a_correctable_parsing_failure(rationale):
-    parsed = parse_verifier(
-        _verifier_answer(rationale), [(FindingCode.PRICE_DEVIATION, 0)]
-    )
+    parsed = parse_verifier(_verifier_answer(rationale), [(FindingCode.PRICE_DEVIATION, 0)])
 
     assert isinstance(parsed, CorrectableError)
     assert "field 'rationale'" in parsed.message

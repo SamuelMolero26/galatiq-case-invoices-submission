@@ -1,12 +1,11 @@
 """Results read models for the reviewer TUI, built only from the Ledger record (plan 4.2-4.3)."""
 
 import json
-from collections import Counter
 from datetime import date
 from decimal import Decimal
 
 import pytest
-from conftest import Harness, concur, text_reply
+from conftest import Harness, concur, ledger_states, text_reply
 
 from invoice_pipeline import ledger, service, view
 
@@ -53,21 +52,13 @@ def _detail(ledger_path, source) -> view.ArrivalDetail:
     return view.arrival_detail(ledger_path, _arrival_id(ledger_path, source))
 
 
-def _states(ledger_path) -> Counter:
-    conn = ledger.connect(ledger_path, read_only=True)
-    try:
-        return Counter(r["state"] for r in conn.execute("SELECT state FROM arrivals"))
-    finally:
-        conn.close()
-
-
 def _notes(detail) -> dict[str, view.Note]:
     return {note.role: note for note in detail.notes}
 
 
 def test_views_follow_ledger_states_and_the_review_queue(batch_ledger):
     results = view.results(batch_ledger)
-    states = _states(batch_ledger)
+    states = ledger_states(batch_ledger)
 
     assert results.count("all") == sum(states.values()) == 20
     assert results.count("approved") == states["paid"]
@@ -82,7 +73,7 @@ def test_views_follow_ledger_states_and_the_review_queue(batch_ledger):
 
 def test_funnel_counts_come_from_the_ledger(batch_ledger):
     results = view.results(batch_ledger)
-    states = _states(batch_ledger)
+    states = ledger_states(batch_ledger)
 
     assert results.files == 20
     assert results.funnel["ingest"] == 20

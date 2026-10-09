@@ -5,14 +5,13 @@ import asyncio
 import dataclasses
 import io
 import json
-from collections import Counter
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("textual")
 
-from conftest import Harness, text_reply  # noqa: E402
+from conftest import Harness, ledger_states, text_reply  # noqa: E402
 from rich.console import Console, Group  # noqa: E402
 from rich.text import Text  # noqa: E402
 
@@ -43,14 +42,6 @@ def render_detail(detail) -> Group:
     return Group(*tui._summary(detail), *([Text(), chips] if chips is not None else []))
 
 
-def _states(ledger_path) -> Counter:
-    conn = ledger.connect(ledger_path, read_only=True)
-    try:
-        return Counter(r["state"] for r in conn.execute("SELECT state FROM arrivals"))
-    finally:
-        conn.close()
-
-
 def _view(app):
     files, detail = app.query_one(tui.FileList), app.query_one(tui.DetailPane)
     shown = detail.detail.source if detail.detail else None
@@ -58,7 +49,7 @@ def _view(app):
 
 
 def test_tabs_show_counts_matching_ledger_states(batch_ledger):
-    states = _states(batch_ledger)
+    states = ledger_states(batch_ledger)
     queued = len(service.review_queue(batch_ledger))
 
     async def script(pilot):

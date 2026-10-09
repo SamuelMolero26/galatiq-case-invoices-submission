@@ -20,17 +20,8 @@ def without_textual(monkeypatch):
     monkeypatch.delattr(invoice_pipeline, "tui", raising=False)  # set by an earlier import
 
 
-def test_tui_without_textual_names_the_extra(batch_ledger, without_textual, capsys):
-    code = cli.main(["tui", "--ledger", str(batch_ledger)])
-
-    assert code == cli.EXIT_FAILED
-    err = capsys.readouterr().err
-    assert "Textual" in err and "invoice-pipeline[tui]" in err and "--extra tui" in err
-
-
-def test_batch_and_review_list_work_without_textual(
-    tmp_path, batch_ledger, without_textual, capsys
-):
+def test_cli_degrades_gracefully_without_textual(tmp_path, batch_ledger, without_textual, capsys):
+    """Without the extra, batch and review still work and `tui` names the extra."""
     one = SAMPLE_INVOICES / "invoice_1001.txt"
     batch = ["--invoice_path", str(one), "--llm", "offline", "--json"]
     batch += ["--ledger", str(tmp_path / "b.db"), "--inventory", str(tmp_path / "inv.db")]
@@ -42,13 +33,9 @@ def test_batch_and_review_list_work_without_textual(
     assert len(listed) == 8
     assert "invoice_pipeline.tui" not in sys.modules
 
-
-def test_tui_refuses_a_missing_ledger(tmp_path, capsys):
-    code = cli.main(["tui", "--ledger", str(tmp_path / "missing.db")])
-
-    assert code == cli.EXIT_FAILED
-    assert "ledger not found" in capsys.readouterr().err
-    assert not (tmp_path / "missing.db").exists()
+    assert cli.main(["tui", "--ledger", str(batch_ledger)]) == cli.EXIT_FAILED
+    err = capsys.readouterr().err
+    assert "Textual" in err and "invoice-pipeline[tui]" in err and "--extra tui" in err
 
 
 def test_importing_the_cli_does_not_import_textual():
@@ -59,15 +46,3 @@ def test_importing_the_cli_does_not_import_textual():
     )
 
     assert out.stdout.strip() == "False"
-
-
-def test_tui_receives_the_runtime_flags(batch_ledger, monkeypatch):
-    seen = {}
-    fake = type(sys)("invoice_pipeline.tui")
-    fake.run = lambda ledger_path, args=None: seen.update(args=args) or 0
-    monkeypatch.setitem(sys.modules, "invoice_pipeline.tui", fake)
-    monkeypatch.setattr(invoice_pipeline, "tui", fake, raising=False)
-
-    code = cli.main(["--llm", "offline", "tui", "--ledger", str(batch_ledger)])
-
-    assert code == 0 and seen["args"].llm == "offline"

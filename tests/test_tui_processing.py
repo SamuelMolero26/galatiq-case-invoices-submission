@@ -1,7 +1,6 @@
 """The reviewer TUI New run and Processing views, driven headless through Pilot (plan 4.5-4.6)."""
 
 import argparse
-import asyncio
 import threading
 from pathlib import Path
 
@@ -10,21 +9,12 @@ import pytest
 pytest.importorskip("textual")
 
 from conftest import SAMPLE_INVOICES  # noqa: E402
-from test_tui import SIZE, plain  # noqa: E402
+from test_tui import drive, plain  # noqa: E402
 from textual.widgets import Input  # noqa: E402
 
 from invoice_pipeline import service, tui, view  # noqa: E402
 
 SAMPLE_NAMES = sorted(p.name for p in SAMPLE_INVOICES.iterdir() if p.is_file())
-
-
-def drive(app, script):
-    async def main():
-        async with app.run_test(size=SIZE) as pilot:
-            await pilot.pause()
-            return await script(pilot)
-
-    return asyncio.run(main())
 
 
 async def type_source(pilot, path) -> None:
@@ -263,3 +253,60 @@ def test_enter_runs_nothing_when_the_source_has_no_files(tmp_path):
 
     assert (mode, workers) == ("new_run", [])
     assert "not found:" in status
+
+
+# Live ingestion pane: what each ingested file parsed into, fed by scripted pipeline events.
+
+PARSED = {
+    "unreadable": False,
+    "vendor": "Acme Corp",
+    "invoice_number": "INV-7",
+    "total": "125.50",
+    "currency": "USD",
+    "items": 2,
+    "findings": ["MISSING_PO"],
+}
+
+
+def pane_text(app) -> str:
+    return " ".join(plain(app.query_one(tui.IngestionPane).body.content, width=60).split())
+
+
+def run_events(batch_ledger, names, events):
+    discovery = service.Discovery(tuple(Path(n) for n in names), {})
+
+    async def script(pilot):
+        await pilot.pause()
+        pilot.app._show_processing("inbox/", discovery)
+        for name in names:
+            pilot.app._file_started(name)
+        for event in events:
+            pilot.app._pipeline_event(*event)
+        await pilot.pause()
+        return pane_text(pilot.app)
+
+    return drive(tui.InvoiceApp(batch_ledger, start="new_run"), script)
+
+
+def test_the_pane_lists_what_each_ingested_file_parsed_into(batch_ledger):
+    text = run_events(
+        batch_ledger,
+        ["a.json", "b.json", "c.txt", "many.csv"],
+        [
+            ("ingested", "a.json", PARSED),
+            ("extract", "a.json", {"fields": ["vendor"]}),
+            (
+                "ingested",
+                "b.json",
+                {"unreadable": True, "reason": "parse: bad json", "findings": []},
+            ),
+            ("ingested", "many.csv", PARSED),
+            ("ingested", "many.csv", PARSED | {"invoice_number": "INV-8"}),
+        ],
+    )
+
+    assert "a.json" in text and "Acme Corp · INV-7 · 125.50 USD · 2 items" in text
+    assert "MISSING_PO" in text and "extracted: vendor" in text
+    assert "b.json" in text and "unreadable: parse: bad json" in text
+    assert "c.txt" not in text  # not ingested yet
+    assert text.count("many.csv") == 2 and "INV-8" in text  # one block per invoice

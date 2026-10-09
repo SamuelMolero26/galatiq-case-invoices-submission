@@ -11,10 +11,23 @@ CORPUS = Path(__file__).resolve().parent.parent / "data" / "invoices"
 
 
 def _inv(**kw):
-    base = dict(invoice_number="INV-1004", vendor="V", invoice_date=None, due_date_text=None,
-                payment_terms=None, currency="USD", items=[], subtotal=None, tax=None,
-                shipping=None, total=Decimal("5940.00"), notes=None, po_reference=None,
-                source_path="x", source_format="json")
+    base = dict(
+        invoice_number="INV-1004",
+        vendor="V",
+        invoice_date=None,
+        due_date_text=None,
+        payment_terms=None,
+        currency="USD",
+        items=[],
+        subtotal=None,
+        tax=None,
+        shipping=None,
+        total=Decimal("5940.00"),
+        notes=None,
+        po_reference=None,
+        source_path="x",
+        source_format="json",
+    )
     return Invoice(**{**base, **kw})
 
 
@@ -52,8 +65,9 @@ def test_reviewer_approval_pays_only_the_revision_delta(tmp_path):
     paid = []
     rt = dataclasses.replace(
         service.bootstrap(args),
-        pay_fn=lambda vendor, amount, currency: paid.append((vendor, amount, currency))
-        or {"status": "success"},
+        pay_fn=lambda vendor, amount, currency: (
+            paid.append((vendor, amount, currency)) or {"status": "success"}
+        ),
     )
 
     original = service.process_path(CORPUS / "invoice_1004.json", rt).results[0]

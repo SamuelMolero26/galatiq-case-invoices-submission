@@ -157,10 +157,6 @@ def _list_queue(args, ui) -> int:
 
 
 def _run_tui(args) -> int:
-    ledger_path = service.ledger_path_of(args)
-    if not ledger_path.exists():
-        _error(f"cannot start: ledger not found: {ledger_path}")
-        return EXIT_FAILED
     try:
         from invoice_pipeline import tui  # lazy: Textual is an optional extra
     except ModuleNotFoundError as exc:
@@ -168,7 +164,10 @@ def _run_tui(args) -> int:
             raise
         _error(TUI_EXTRA)
         return EXIT_FAILED
-    return tui.run(ledger_path, args)
+    # No ledger-exists guard: the app bootstraps its runtime on mount
+    # (service.bootstrap creates a missing ledger), so a first-ever
+    # `tui` cold-starts on New run instead of refusing.
+    return tui.run(service.ledger_path_of(args), args)
 
 
 def main(argv: list[str] | None = None, out=None) -> int:

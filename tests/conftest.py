@@ -6,6 +6,7 @@ import io
 import json
 import os
 import socket
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
@@ -232,6 +233,17 @@ class Harness:
 
 
 SAMPLE_INVOICES = Path(__file__).resolve().parent.parent / "data" / "invoices"
+
+
+def ledger_states(ledger_path) -> Counter:
+    """State -> count over every arrival; shared by the Results-view and read-model tests."""
+    from invoice_pipeline import ledger
+
+    conn = ledger.connect(ledger_path, read_only=True)
+    try:
+        return Counter(r["state"] for r in conn.execute("SELECT state FROM arrivals"))
+    finally:
+        conn.close()
 
 
 @pytest.fixture
